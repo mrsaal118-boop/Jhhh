@@ -12,7 +12,16 @@ const LogoutButton = () => {
             onClick={() => logout()}
             variant="outlined"
             startIcon={<LogoutIcon />}
-            color="error">
+            fullWidth
+            size="small"
+            sx={{
+                borderColor: 'rgba(255, 82, 82, 0.3)',
+                color: '#FF5252',
+                '&:hover': {
+                    borderColor: '#FF5252',
+                    backgroundColor: 'rgba(255, 82, 82, 0.08)'
+                }
+            }}>
             Logout
         </Button>
     );

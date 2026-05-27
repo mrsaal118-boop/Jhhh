@@ -2,8 +2,7 @@ export const mainLayout = {
     height: '100vh',
     width: '100vw',
     overflow: 'hidden',
-    display: 'flex',
-    flexDirection: 'column'
+    display: 'flex'
 };
 
 export const appContentWrapper = {

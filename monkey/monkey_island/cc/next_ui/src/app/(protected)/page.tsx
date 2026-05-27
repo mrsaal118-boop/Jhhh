@@ -1,14 +1,12 @@
 'use client';
-import GettingStarted from '@/_components/getting-started/GettingStarted';
-import { appRootDiv } from './style';
-import { styled } from '@mui/material/styles';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { PATHS } from '@/constants/paths.constants';
 
-export default function AppHome() {
-    // @ts-ignore
-    const AppRootDiv = styled('div')(appRootDiv);
-    return (
-        <AppRootDiv>
-            <GettingStarted />
-        </AppRootDiv>
-    );
+export default function ProtectedRoot() {
+    const router = useRouter();
+    useEffect(() => {
+        router.replace(PATHS.DASHBOARD);
+    }, [router]);
+    return null;
 }
