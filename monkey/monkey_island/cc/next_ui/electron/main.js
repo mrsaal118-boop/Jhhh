@@ -76,123 +76,222 @@ function hashPassword(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
 }
 
-// Built-in API server for authentication and network operations
-function createAPIServer() {
+// MIME types for static file serving
+const MIME_TYPES = {
+    '.html': 'text/html',
+    '.js': 'application/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.txt': 'text/plain',
+    '.map': 'application/json'
+};
+
+// Get the path to the static export directory
+function getStaticDir() {
+    if (app.isPackaged) {
+        return path.join(process.resourcesPath, 'out');
+    }
+    return path.join(__dirname, '..', 'out');
+}
+
+// Combined server: API endpoints + static file serving
+function createAppServer() {
     return http.createServer((req, res) => {
-        let body = '';
-        req.on('data', chunk => body += chunk);
-        req.on('end', () => {
+        const urlPath = req.url.split('?')[0];
+
+        // Handle API requests
+        if (urlPath.startsWith('/api/')) {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+                res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+                res.setHeader('Content-Type', 'application/json');
+
+                if (req.method === 'OPTIONS') {
+                    res.writeHead(200);
+                    return res.end();
+                }
+
+                try {
+                    handleApiRequest(urlPath, req.method, body, res);
+                } catch (err) {
+                    res.writeHead(500);
+                    res.end(JSON.stringify({ error: err.message }));
+                }
+            });
+            return;
+        }
+
+        // Handle CORS preflight for any route
+        if (req.method === 'OPTIONS') {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
             res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-            res.setHeader('Content-Type', 'application/json');
+            res.writeHead(200);
+            return res.end();
+        }
 
-            if (req.method === 'OPTIONS') {
-                res.writeHead(200);
-                return res.end();
-            }
-
-            try {
-                // Registration check
-                if (req.url === '/api/registration-status' && req.method === 'GET') {
-                    const users = getUsers();
-                    const needsRegistration = Object.keys(users).length === 0;
-                    res.writeHead(200);
-                    return res.end(JSON.stringify({ registration_needed: needsRegistration }));
-                }
-
-                // Register
-                if (req.url === '/api/register' && req.method === 'POST') {
-                    const data = JSON.parse(body);
-                    const users = getUsers();
-                    if (users[data.username]) {
-                        res.writeHead(400);
-                        return res.end(JSON.stringify({ error: 'User already exists' }));
-                    }
-                    users[data.username] = {
-                        password: hashPassword(data.password),
-                        createdAt: new Date().toISOString()
-                    };
-                    saveUsers(users);
-                    const token = crypto.randomBytes(32).toString('hex');
-                    res.writeHead(200);
-                    return res.end(JSON.stringify({
-                        user: { name: data.username },
-                        token: token,
-                        token_expiration_time: Date.now() + 86400000
-                    }));
-                }
-
-                // Login
-                if (req.url === '/api/login' && req.method === 'POST') {
-                    const data = JSON.parse(body);
-                    const users = getUsers();
-                    const user = users[data.username];
-                    if (!user || user.password !== hashPassword(data.password)) {
-                        res.writeHead(401);
-                        return res.end(JSON.stringify({ error: 'Invalid credentials' }));
-                    }
-                    const token = crypto.randomBytes(32).toString('hex');
-                    res.writeHead(200);
-                    return res.end(JSON.stringify({
-                        user: { name: data.username },
-                        token: token,
-                        token_expiration_time: Date.now() + 86400000
-                    }));
-                }
-
-                // Network scan (real ping sweep)
-                if (req.url === '/api/scan-network' && req.method === 'POST') {
-                    const data = JSON.parse(body);
-                    const subnet = data.subnet || getLocalSubnet();
-                    performNetworkScan(subnet, (results) => {
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ hosts: results, subnet: subnet }));
-                    });
-                    return;
-                }
-
-                // Port scan (real)
-                if (req.url === '/api/scan-ports' && req.method === 'POST') {
-                    const data = JSON.parse(body);
-                    performPortScan(data.host, data.ports || [22, 80, 443, 445, 3389, 8080, 8443], (results) => {
-                        res.writeHead(200);
-                        res.end(JSON.stringify({ host: data.host, ports: results }));
-                    });
-                    return;
-                }
-
-                // Get local network info
-                if (req.url === '/api/network-info' && req.method === 'GET') {
-                    const info = getNetworkInfo();
-                    res.writeHead(200);
-                    return res.end(JSON.stringify(info));
-                }
-
-                // System info
-                if (req.url === '/api/system-info' && req.method === 'GET') {
-                    res.writeHead(200);
-                    return res.end(JSON.stringify({
-                        hostname: os.hostname(),
-                        platform: os.platform(),
-                        arch: os.arch(),
-                        cpus: os.cpus().length,
-                        totalMemory: os.totalmem(),
-                        freeMemory: os.freemem(),
-                        uptime: os.uptime(),
-                        networkInterfaces: getNetworkInfo().interfaces,
-                        version: '2.3.0'
-                    }));
-                }
-
-                res.writeHead(404);
-                res.end(JSON.stringify({ error: 'Not found' }));
-            } catch (err) {
-                res.writeHead(500);
-                res.end(JSON.stringify({ error: err.message }));
-            }
-        });
+        // Serve static files from the Next.js export
+        serveStaticFile(urlPath, res);
     });
+}
+
+function handleApiRequest(urlPath, method, body, res) {
+    // Registration check
+    if (urlPath === '/api/registration-status' && method === 'GET') {
+        const users = getUsers();
+        res.writeHead(200);
+        return res.end(JSON.stringify({ registration_needed: Object.keys(users).length === 0 }));
+    }
+
+    // Register
+    if (urlPath === '/api/register' && method === 'POST') {
+        const data = JSON.parse(body);
+        const users = getUsers();
+        if (users[data.username]) {
+            res.writeHead(400);
+            return res.end(JSON.stringify({ error: 'User already exists' }));
+        }
+        users[data.username] = {
+            password: hashPassword(data.password),
+            createdAt: new Date().toISOString()
+        };
+        saveUsers(users);
+        const token = crypto.randomBytes(32).toString('hex');
+        res.writeHead(200);
+        return res.end(JSON.stringify({
+            user: { name: data.username },
+            token: token,
+            token_expiration_time: Date.now() + 86400000
+        }));
+    }
+
+    // Login
+    if (urlPath === '/api/login' && method === 'POST') {
+        const data = JSON.parse(body);
+        const users = getUsers();
+        const user = users[data.username];
+        if (!user || user.password !== hashPassword(data.password)) {
+            res.writeHead(401);
+            return res.end(JSON.stringify({ error: 'Invalid credentials' }));
+        }
+        const token = crypto.randomBytes(32).toString('hex');
+        res.writeHead(200);
+        return res.end(JSON.stringify({
+            user: { name: data.username },
+            token: token,
+            token_expiration_time: Date.now() + 86400000
+        }));
+    }
+
+    // Network scan (real ping sweep)
+    if (urlPath === '/api/scan-network' && method === 'POST') {
+        const data = JSON.parse(body);
+        const subnet = data.subnet || getLocalSubnet();
+        performNetworkScan(subnet, (results) => {
+            res.writeHead(200);
+            res.end(JSON.stringify({ hosts: results, subnet: subnet }));
+        });
+        return;
+    }
+
+    // Port scan (real)
+    if (urlPath === '/api/scan-ports' && method === 'POST') {
+        const data = JSON.parse(body);
+        performPortScan(data.host, data.ports || [22, 80, 443, 445, 3389, 8080, 8443], (results) => {
+            res.writeHead(200);
+            res.end(JSON.stringify({ host: data.host, ports: results }));
+        });
+        return;
+    }
+
+    // Network info
+    if (urlPath === '/api/network-info' && method === 'GET') {
+        res.writeHead(200);
+        return res.end(JSON.stringify(getNetworkInfo()));
+    }
+
+    // System info
+    if (urlPath === '/api/system-info' && method === 'GET') {
+        res.writeHead(200);
+        return res.end(JSON.stringify({
+            hostname: os.hostname(),
+            platform: os.platform(),
+            arch: os.arch(),
+            cpus: os.cpus().length,
+            totalMemory: os.totalmem(),
+            freeMemory: os.freemem(),
+            uptime: os.uptime(),
+            networkInterfaces: getNetworkInfo().interfaces,
+            version: '2.4.0'
+        }));
+    }
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: 'Not found' }));
+}
+
+function serveStaticFile(urlPath, res) {
+    const staticDir = getStaticDir();
+
+    // Try to find the file
+    let filePath;
+    const decodedPath = decodeURIComponent(urlPath);
+
+    if (decodedPath === '/') {
+        filePath = path.join(staticDir, 'index.html');
+    } else {
+        // First try exact file path
+        filePath = path.join(staticDir, decodedPath);
+    }
+
+    // Security: prevent path traversal
+    if (!filePath.startsWith(staticDir)) {
+        res.writeHead(403);
+        return res.end('Forbidden');
+    }
+
+    // Try the exact path, then with index.html, then with .html
+    const candidates = [
+        filePath,
+        path.join(filePath, 'index.html'),
+        filePath + '.html',
+        filePath.replace(/\/$/, '') + '/index.html'
+    ];
+
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+            const ext = path.extname(candidate).toLowerCase();
+            const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+            res.setHeader('Content-Type', contentType);
+            res.writeHead(200);
+            const stream = fs.createReadStream(candidate);
+            stream.pipe(res);
+            return;
+        }
+    }
+
+    // Fallback: serve index.html for client-side routing
+    const indexPath = path.join(staticDir, 'index.html');
+    if (fs.existsSync(indexPath)) {
+        res.setHeader('Content-Type', 'text/html');
+        res.writeHead(200);
+        fs.createReadStream(indexPath).pipe(res);
+        return;
+    }
+
+    res.writeHead(404);
+    res.end('Not found');
 }
 
 // Real network scanning functions
@@ -323,103 +422,10 @@ function performPortScan(host, ports, callback) {
     });
 }
 
-// Start the Next.js standalone server
-function startNextServer(port) {
-    return new Promise((resolve, reject) => {
-        // In packaged app, use the standalone server
-        const isPackaged = app.isPackaged;
-        let serverPath, cwd;
-
-        if (isPackaged) {
-            const resourcesPath = process.resourcesPath;
-            serverPath = path.join(resourcesPath, 'standalone', 'server.js');
-            cwd = path.join(resourcesPath, 'standalone');
-        } else {
-            serverPath = path.join(__dirname, '..', '.next', 'standalone', 'server.js');
-            cwd = path.join(__dirname, '..', '.next', 'standalone');
-        }
-
-        console.log('Starting Next.js server from:', serverPath);
-        console.log('CWD:', cwd);
-        console.log('Exists:', fs.existsSync(serverPath));
-
-        if (!fs.existsSync(serverPath)) {
-            console.error('Server file not found at:', serverPath);
-            // Fall back to loading static files
-            resolve();
-            return;
-        }
-
-        // In dev mode, copy static and public files to standalone if needed
-        if (!isPackaged) {
-            const staticSrc = path.join(__dirname, '..', '.next', 'static');
-            const staticDest = path.join(cwd, '.next', 'static');
-            if (fs.existsSync(staticSrc) && !fs.existsSync(staticDest)) {
-                try { fs.cpSync(staticSrc, staticDest, { recursive: true }); } catch (e) { console.error('Copy static:', e); }
-            }
-            const publicSrc = path.join(__dirname, '..', 'public');
-            const publicDest = path.join(cwd, 'public');
-            if (fs.existsSync(publicSrc) && !fs.existsSync(publicDest)) {
-                try { fs.cpSync(publicSrc, publicDest, { recursive: true }); } catch (e) { console.error('Copy public:', e); }
-            }
-        }
-
-        const serverProcess = spawn(process.execPath, [serverPath], {
-            cwd: cwd,
-            env: {
-                ...process.env,
-                ELECTRON_RUN_AS_NODE: '1',
-                PORT: String(port),
-                HOSTNAME: '127.0.0.1',
-                NODE_ENV: 'production'
-            },
-            stdio: 'pipe'
-        });
-
-        let started = false;
-        const onData = (data) => {
-            const output = data.toString();
-            console.log('[Next.js]', output);
-            if (!started && (output.includes('Ready') || output.includes('started') || output.includes('listening'))) {
-                started = true;
-                resolve();
-            }
-        };
-
-        serverProcess.stdout.on('data', onData);
-        serverProcess.stderr.on('data', (data) => {
-            console.error('[Next.js Error]', data.toString());
-            // Some Next.js messages go to stderr
-            onData(data);
-        });
-
-        serverProcess.on('error', (err) => {
-            console.error('Failed to start Next.js:', err);
-            if (!started) {
-                started = true;
-                resolve(); // Don't reject - we'll try to show an error page
-            }
-        });
-
-        serverProcess.on('exit', (code) => {
-            console.log('Next.js server exited with code:', code);
-        });
-
-        // Store reference for cleanup
-        global.nextServerProcess = serverProcess;
-
-        // Fallback timeout
-        setTimeout(() => {
-            if (!started) {
-                started = true;
-                resolve();
-            }
-        }, 15000);
-    });
-}
+// No separate Next.js server needed - static files served by the combined app server
 
 function createWindow(port) {
-    const apiPort = global.apiPort || (port + 1);
+    const apiPort = port; // API and static files served on same port
 
     mainWindow = new BrowserWindow({
         width: 1400,
@@ -663,36 +669,27 @@ app.whenReady().then(async () => {
     const splash = createSplashWindow();
 
     try {
-        // Find available ports dynamically
-        const apiPort = await findAvailablePort(17813);
+        // Find an available port for the combined server (API + static files)
         const appPort = await findAvailablePort(17812);
+        console.log(`Using port: ${appPort}`);
+        console.log(`Static dir: ${getStaticDir()}`);
+        console.log(`Static dir exists: ${fs.existsSync(getStaticDir())}`);
 
-        console.log(`Using API port: ${apiPort}, App port: ${appPort}`);
-
-        // Store API port globally so createWindow can access it
-        global.apiPort = apiPort;
-
-        // Start the API server
-        const apiServer = createAPIServer();
+        // Start the combined server (serves both API and static files)
+        const appServer = createAppServer();
         await new Promise((resolve, reject) => {
-            apiServer.on('error', (err) => {
-                console.error('API server error:', err);
+            appServer.on('error', (err) => {
+                console.error('Server error:', err);
                 reject(err);
             });
-            apiServer.listen(apiPort, '127.0.0.1', () => {
-                console.log(`API server running on port ${apiPort}`);
+            appServer.listen(appPort, '127.0.0.1', () => {
+                console.log(`App server running on port ${appPort}`);
                 resolve();
             });
         });
-        global.apiServer = apiServer;
+        global.apiServer = appServer;
 
-        if (isDev) {
-            createWindow(3000);
-        } else {
-            await startNextServer(appPort);
-            createWindow(appPort);
-        }
-
+        createWindow(appPort);
         splash.close();
     } catch (err) {
         console.error('Failed to start:', err);
@@ -706,12 +703,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-    if (global.nextServerProcess) global.nextServerProcess.kill();
     if (global.apiServer) global.apiServer.close();
     app.quit();
 });
 
 app.on('before-quit', () => {
-    if (global.nextServerProcess) global.nextServerProcess.kill();
     if (global.apiServer) global.apiServer.close();
 });

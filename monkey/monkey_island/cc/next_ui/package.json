@@ -11,7 +11,7 @@
     "dev:electron": "concurrently \"npx next dev -p 3000\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=development electron .\"",
     "prod": "cross-env SSL_CERT_PATH=../server.crt SSL_KEY_PATH=../server.key NEXT_PUBLIC_JAVASCRIPT_RUNTIME_PORT=8443 node server-prod.js",
     "build": "node build-standalone.js",
-    "build:next": "npx next build",
+    "build:next": "next build",
     "build:electron": "npm run build:next && electron-builder --win --publish never",
     "build:electron:linux": "npm run build:next && electron-builder --linux --publish never",
     "build:electron:all": "npm run build:next && electron-builder --win --linux --publish never",
@@ -71,18 +71,8 @@
     },
     "extraResources": [
       {
-        "from": ".next/standalone",
-        "to": "standalone",
-        "filter": ["**/*"]
-      },
-      {
-        "from": ".next/static",
-        "to": "standalone/.next/static",
-        "filter": ["**/*"]
-      },
-      {
-        "from": "public",
-        "to": "standalone/public",
+        "from": "out",
+        "to": "out",
         "filter": ["**/*"]
       }
     ],
