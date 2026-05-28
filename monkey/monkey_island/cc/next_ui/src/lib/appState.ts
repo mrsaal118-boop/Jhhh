@@ -420,9 +420,9 @@ export async function runRealSimulation(
 
     if (getSimulation().status !== 'running') return;
 
-    // Phase 3: Exploitation attempts
+    // Phase 3: Auto-Exploitation (tries ALL methods: SSH, SMB, FTP, Telnet, Redis, MongoDB, MySQL, PostgreSQL, VNC + default creds)
     sim = updateSimulation({
-        currentPhase: 'Exploitation',
+        currentPhase: 'Auto-Exploitation',
         phases: {
             scanning: 100,
             exploitation: 50,
@@ -432,111 +432,117 @@ export async function runRealSimulation(
     });
     onProgress(sim);
 
+    addEvent({
+        type: 'exploitation',
+        severity: 'warning',
+        source: 'Exploiter',
+        target: 'All Hosts',
+        message: `Starting auto-exploitation against ${hosts.length} hosts with ${config.credentials.length} user credentials + 25 default credential pairs`
+    });
+
     let exploitCount = 0;
     let implantCount = 0;
-    for (const host of hosts) {
+    for (let hi = 0; hi < hosts.length; hi++) {
         if (getSimulation().status !== 'running') return;
 
+        const host = hosts[hi];
         const openPorts = host.ports.filter((p) => p.state === 'open');
         if (openPorts.length === 0) continue;
 
-        // Try credential-based exploitation via API
-        for (const cred of config.credentials) {
-            if (getSimulation().status !== 'running') return;
+        addEvent({
+            type: 'exploitation',
+            severity: 'info',
+            source: 'Exploiter',
+            target: host.ip,
+            message: `Auto-exploiting ${host.ip} (${
+                openPorts.length
+            } open ports: ${openPorts.map((p) => p.port).join(', ')})`
+        });
 
-            // Check SSH
-            if (config.enableSSH && openPorts.some((p) => p.port === 22)) {
-                try {
-                    const resp = await fetch(getApiUrl('/api/exploit-ssh'), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            host: host.ip,
-                            username: cred.username,
-                            password: cred.password
-                        })
-                    });
-                    const result = await resp.json();
-                    if (result.success) {
-                        host.exploited = true;
-                        host.exploitMethod = `SSH (${cred.username})`;
-                        host.implanted = true;
-                        exploitCount++;
-                        implantCount++;
-                        const node = propagationTree.find(
-                            (n) => n.ip === host.ip
-                        );
-                        if (node) {
-                            node.status = 'implanted';
-                            node.exploitUsed = `SSH credential: ${cred.username}`;
-                        }
-                        addEvent({
-                            type: 'exploitation',
-                            severity: 'success',
-                            source: 'Exploiter',
-                            target: host.ip,
-                            message: `SSH exploitation successful with user "${cred.username}". Agent implanted.`
-                        });
-                        break;
-                    }
-                } catch {
-                    // SSH exploit attempt failed
+        try {
+            const resp = await fetch(getApiUrl('/api/auto-exploit'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    host: host.ip,
+                    openPorts: openPorts.map((p) => ({
+                        port: p.port,
+                        service: p.service
+                    })),
+                    credentials: config.credentials
+                })
+            });
+            const result = await resp.json();
+
+            if (result.success) {
+                host.exploited = true;
+                host.exploitMethod = `${result.method} (${
+                    result.username || 'no-auth'
+                })`;
+                exploitCount++;
+
+                const isImplant =
+                    result.method === 'SSH' ||
+                    result.method === 'Telnet' ||
+                    result.method === 'Redis-NoAuth' ||
+                    result.method === 'MongoDB-NoAuth';
+                if (isImplant) {
+                    host.implanted = true;
+                    implantCount++;
                 }
-            }
 
-            // Check SMB
-            if (config.enableSMB && openPorts.some((p) => p.port === 445)) {
-                try {
-                    const resp = await fetch(getApiUrl('/api/exploit-smb'), {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            host: host.ip,
-                            username: cred.username,
-                            password: cred.password
-                        })
-                    });
-                    const result = await resp.json();
-                    if (result.success) {
-                        host.exploited = true;
-                        host.exploitMethod = `SMB (${cred.username})`;
-                        exploitCount++;
-                        const node = propagationTree.find(
-                            (n) => n.ip === host.ip
-                        );
-                        if (node) {
-                            node.status = 'exploited';
-                            node.exploitUsed = `SMB credential: ${cred.username}`;
-                        }
-                        addEvent({
-                            type: 'exploitation',
-                            severity: 'success',
-                            source: 'Exploiter',
-                            target: host.ip,
-                            message: `SMB access successful with user "${cred.username}"`
-                        });
-                        break;
-                    }
-                } catch {
-                    // SMB exploit attempt failed
+                const node = propagationTree.find((n) => n.ip === host.ip);
+                if (node) {
+                    node.status = isImplant ? 'implanted' : 'exploited';
+                    node.exploitUsed = `${result.method}: ${
+                        result.username || 'no-auth'
+                    }`;
                 }
-            }
-        }
-
-        // Mark failed exploitation
-        if (!host.exploited) {
-            const node = propagationTree.find((n) => n.ip === host.ip);
-            if (node && openPorts.length > 0) {
-                node.status = 'failed';
+                addEvent({
+                    type: 'exploitation',
+                    severity: 'success',
+                    source: 'Exploiter',
+                    target: host.ip,
+                    message: `${result.method} exploitation successful${
+                        result.username
+                            ? ` (user: ${result.username})`
+                            : ' (no-auth)'
+                    }${isImplant ? ' - Agent implanted!' : ''}`
+                });
+            } else {
+                const node = propagationTree.find((n) => n.ip === host.ip);
+                if (node) {
+                    node.status = 'failed';
+                }
+                const attemptCount = result.allResults?.length || 0;
                 addEvent({
                     type: 'exploitation',
                     severity: 'info',
                     source: 'Exploiter',
                     target: host.ip,
-                    message: `Exploitation failed - no valid credentials for open services`
+                    message: `All ${attemptCount} exploitation attempts failed against ${host.ip}`
                 });
             }
+        } catch {
+            const node = propagationTree.find((n) => n.ip === host.ip);
+            if (node) node.status = 'failed';
         }
+
+        sim = updateSimulation({
+            exploitsSuccessful: exploitCount,
+            machinesExploited: hosts.filter((h) => h.exploited).length,
+            phases: {
+                scanning: 100,
+                exploitation: 50 + Math.round(((hi + 1) / hosts.length) * 50),
+                postExploitation: 0,
+                reporting: 0
+            },
+            currentPhase: `Auto-Exploitation (${hi + 1}/${hosts.length})`
+        });
+        onProgress(sim);
+
+        savePropagationTree(propagationTree);
+        saveScanResults(hosts);
     }
 
     sim = updateSimulation({
