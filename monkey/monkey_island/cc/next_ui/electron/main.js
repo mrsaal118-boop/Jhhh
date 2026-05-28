@@ -233,8 +233,38 @@ function handleApiRequest(urlPath, method, body, res) {
             freeMemory: os.freemem(),
             uptime: os.uptime(),
             networkInterfaces: getNetworkInfo().interfaces,
-            version: '2.4.0'
+            version: '2.5.0'
         }));
+    }
+
+    // SSH exploitation attempt (real TCP connection test)
+    if (urlPath === '/api/exploit-ssh' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptSSHExploit(data.host, data.username, data.password, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // SMB exploitation attempt (real TCP connection test)
+    if (urlPath === '/api/exploit-smb' && method === 'POST') {
+        const data = JSON.parse(body);
+        attemptSMBExploit(data.host, data.username, data.password, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Post-exploitation data collection
+    if (urlPath === '/api/post-exploit' && method === 'POST') {
+        const data = JSON.parse(body);
+        collectPostExploitData(data.host, data.method, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
     }
 
     res.writeHead(404);
@@ -419,6 +449,127 @@ function performPortScan(host, ports, callback) {
         });
 
         socket.connect(port, host);
+    });
+}
+
+// SSH exploitation: attempt real TCP connection to SSH port with banner grab
+function attemptSSHExploit(host, username, password, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+    let banner = '';
+
+    socket.on('connect', () => {
+        // Connected to SSH port - grab banner
+        socket.on('data', (data) => {
+            banner += data.toString();
+            // SSH banner received - this means SSH is accepting connections
+            // In a real pentest tool, we would use an SSH library to authenticate
+            // For now, we verify the service is accessible and report it
+            socket.destroy();
+
+            // Try to exec ssh command for real authentication (non-interactive)
+            const isWin = process.platform === 'win32';
+            if (!isWin) {
+                // On Linux/Mac, attempt real SSH with sshpass if available
+                exec(`which sshpass`, { timeout: 2000 }, (err) => {
+                    if (!err) {
+                        exec(`sshpass -p '${password.replace(/'/g, "\\'")}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=no ${username}@${host} "echo MONKEY_SUCCESS" 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                            if (stdout && stdout.includes('MONKEY_SUCCESS')) {
+                                callback({ success: true, method: 'SSH', banner: banner.trim(), host, username });
+                            } else {
+                                callback({ success: false, method: 'SSH', banner: banner.trim(), error: 'Authentication failed' });
+                            }
+                        });
+                    } else {
+                        // No sshpass - just report SSH is open and banner
+                        callback({ success: false, method: 'SSH', banner: banner.trim(), error: 'SSH service accessible but sshpass not available for auth test' });
+                    }
+                });
+            } else {
+                callback({ success: false, method: 'SSH', banner: banner.trim(), error: 'SSH service accessible, credential test requires sshpass' });
+            }
+        });
+    });
+
+    socket.on('timeout', () => {
+        socket.destroy();
+        callback({ success: false, method: 'SSH', error: 'Connection timeout' });
+    });
+
+    socket.on('error', (err) => {
+        callback({ success: false, method: 'SSH', error: err.message });
+    });
+
+    socket.connect(22, host);
+}
+
+// SMB exploitation: attempt real TCP connection to SMB port
+function attemptSMBExploit(host, username, password, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+
+    socket.on('connect', () => {
+        socket.destroy();
+        // SMB port is open - try net use on Windows or smbclient on Linux
+        const isWin = process.platform === 'win32';
+        if (isWin) {
+            exec(`net use \\\\${host}\\IPC$ /user:${username} ${password} 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                // Clean up the connection
+                exec(`net use \\\\${host}\\IPC$ /delete /y 2>&1`, { timeout: 5000 }, () => {});
+                if (!error && !stdout.includes('error')) {
+                    callback({ success: true, method: 'SMB', host, username });
+                } else {
+                    callback({ success: false, method: 'SMB', error: 'SMB authentication failed' });
+                }
+            });
+        } else {
+            exec(`which smbclient`, { timeout: 2000 }, (err) => {
+                if (!err) {
+                    exec(`smbclient -L ${host} -U '${username}%${password}' -t 5 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                        if (stdout && (stdout.includes('Sharename') || stdout.includes('Disk'))) {
+                            callback({ success: true, method: 'SMB', host, username });
+                        } else {
+                            callback({ success: false, method: 'SMB', error: 'SMB authentication failed' });
+                        }
+                    });
+                } else {
+                    callback({ success: false, method: 'SMB', error: 'SMB service accessible but smbclient not available' });
+                }
+            });
+        }
+    });
+
+    socket.on('timeout', () => {
+        socket.destroy();
+        callback({ success: false, method: 'SMB', error: 'Connection timeout' });
+    });
+
+    socket.on('error', (err) => {
+        callback({ success: false, method: 'SMB', error: err.message });
+    });
+
+    socket.connect(445, host);
+}
+
+// Post-exploitation: collect info from exploited host
+function collectPostExploitData(host, method, callback) {
+    const isWin = process.platform === 'win32';
+
+    // Determine OS by checking what ports responded
+    // Also try to get hostname via reverse DNS
+    exec(`${isWin ? 'nslookup' : 'host'} ${host} 2>&1`, { timeout: 5000 }, (error, stdout) => {
+        let hostname = '';
+        if (stdout) {
+            const match = stdout.match(/name\s*[=:]\s*(\S+)/i) || stdout.match(/pointer\s+(\S+)/i);
+            if (match) hostname = match[1].replace(/\.$/, '');
+        }
+
+        callback({
+            host: host,
+            hostname: hostname,
+            os: method && method.includes('SSH') ? 'Linux/Unix' : method && method.includes('SMB') ? 'Windows' : 'Unknown',
+            info: `Hostname: ${hostname || 'unknown'}, Access via: ${method || 'unknown'}`
+        });
     });
 }
 

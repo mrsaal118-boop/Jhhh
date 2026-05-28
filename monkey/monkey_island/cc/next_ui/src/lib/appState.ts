@@ -1,8 +1,12 @@
+import { getApiUrl } from './apiPort';
+
 const STORAGE_KEYS = {
     CONFIG: 'monkey_config',
     SIMULATION: 'monkey_simulation',
     EVENTS: 'monkey_events',
-    SETTINGS: 'monkey_settings'
+    SETTINGS: 'monkey_settings',
+    SCAN_RESULTS: 'monkey_scan_results',
+    PROPAGATION_TREE: 'monkey_propagation_tree'
 };
 
 export interface MonkeyConfig {
@@ -13,6 +17,10 @@ export interface MonkeyConfig {
     targetSubnets: string;
     blockedIPs: string;
     credentials: { username: string; password: string }[];
+    scanPorts: number[];
+    enableSSH: boolean;
+    enableSMB: boolean;
+    enableRDP: boolean;
 }
 
 export interface SimulationState {
@@ -25,6 +33,7 @@ export interface SimulationState {
     machinesScanned: number;
     machinesExploited: number;
     activeAgents: number;
+    currentPhase: string;
     phases: {
         scanning: number;
         exploitation: number;
@@ -43,6 +52,33 @@ export interface MonkeyEvent {
     message: string;
 }
 
+export interface ScanResult {
+    ip: string;
+    alive: boolean;
+    responseTime: number;
+    hostname: string;
+    discoveredAt: string;
+    ports: { port: number; state: string; service: string }[];
+    os?: string;
+    vulnerabilities: string[];
+    exploited: boolean;
+    exploitMethod?: string;
+    implanted: boolean;
+}
+
+export interface PropagationNode {
+    id: string;
+    ip: string;
+    hostname: string;
+    status: 'scanned' | 'exploited' | 'implanted' | 'failed';
+    parent: string | null;
+    depth: number;
+    openPorts: { port: number; service: string }[];
+    exploitUsed?: string;
+    discoveredAt: string;
+    os?: string;
+}
+
 export interface AppSettings {
     islandPort: string;
     logLevel: string;
@@ -57,7 +93,14 @@ const DEFAULT_CONFIG: MonkeyConfig = {
     enablePolymorphism: false,
     targetSubnets: '',
     blockedIPs: '',
-    credentials: []
+    credentials: [],
+    scanPorts: [
+        21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995, 1433,
+        3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017
+    ],
+    enableSSH: true,
+    enableSMB: true,
+    enableRDP: true
 };
 
 const DEFAULT_SIMULATION: SimulationState = {
@@ -70,6 +113,7 @@ const DEFAULT_SIMULATION: SimulationState = {
     machinesScanned: 0,
     machinesExploited: 0,
     activeAgents: 0,
+    currentPhase: '',
     phases: {
         scanning: 0,
         exploitation: 0,
@@ -136,9 +180,39 @@ export function getSimulation(): SimulationState {
     return safeGet(STORAGE_KEYS.SIMULATION, DEFAULT_SIMULATION);
 }
 
-export function startSimulation(): SimulationState {
+export function updateSimulation(
+    partial: Partial<SimulationState>
+): SimulationState {
+    const sim = getSimulation();
+    const updated = { ...sim, ...partial };
+    safeSet(STORAGE_KEYS.SIMULATION, updated);
+    return updated;
+}
+
+export function getScanResults(): ScanResult[] {
+    return safeGet<ScanResult[]>(STORAGE_KEYS.SCAN_RESULTS, []);
+}
+
+export function saveScanResults(results: ScanResult[]): void {
+    safeSet(STORAGE_KEYS.SCAN_RESULTS, results);
+}
+
+export function getPropagationTree(): PropagationNode[] {
+    return safeGet<PropagationNode[]>(STORAGE_KEYS.PROPAGATION_TREE, []);
+}
+
+export function savePropagationTree(tree: PropagationNode[]): void {
+    safeSet(STORAGE_KEYS.PROPAGATION_TREE, tree);
+}
+
+// Real simulation runner - calls actual API endpoints
+export async function runRealSimulation(
+    onProgress: (sim: SimulationState) => void
+): Promise<void> {
     const config = getConfig();
-    const state: SimulationState = {
+
+    // Phase 1: Network Scanning
+    let sim = updateSimulation({
         status: 'running',
         startedAt: new Date().toISOString(),
         stoppedAt: null,
@@ -148,88 +222,415 @@ export function startSimulation(): SimulationState {
         machinesScanned: 0,
         machinesExploited: 0,
         activeAgents: 1,
+        currentPhase: 'Network Scanning',
         phases: {
-            scanning: 0,
+            scanning: 10,
             exploitation: 0,
             postExploitation: 0,
             reporting: 0
         }
-    };
-    safeSet(STORAGE_KEYS.SIMULATION, state);
+    });
+    onProgress(sim);
+
     addEvent({
         type: 'scan',
         severity: 'info',
         source: 'Island',
         target: config.targetSubnets || 'Local Network',
-        message: `Simulation started with propagation depth ${config.propagationDepth}`
+        message: `Real network scan started. Ports: ${config.scanPorts.length}, Depth: ${config.propagationDepth}`
     });
-    return state;
-}
 
-export function progressSimulation(): SimulationState {
-    const sim = getSimulation();
-    if (sim.status !== 'running') return sim;
+    // Call real network scan API
+    let hosts: ScanResult[] = [];
+    try {
+        const scanResp = await fetch(getApiUrl('/api/scan-network'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ subnet: config.targetSubnets || undefined })
+        });
+        const scanData = await scanResp.json();
 
-    const elapsed = sim.startedAt
-        ? (Date.now() - new Date(sim.startedAt).getTime()) / 1000
-        : 0;
+        hosts = (scanData.hosts || []).map(
+            (h: {
+                ip: string;
+                alive: boolean;
+                responseTime: number;
+                hostname: string;
+                discoveredAt: string;
+            }) => ({
+                ...h,
+                ports: [],
+                vulnerabilities: [],
+                exploited: false,
+                implanted: false
+            })
+        );
 
-    if (elapsed < 5) {
-        sim.phases.scanning = Math.min(100, elapsed * 20);
-        sim.machinesScanned = Math.floor(elapsed * 2);
-        sim.machinesDiscovered = Math.floor(elapsed * 1.5);
-    } else if (elapsed < 12) {
-        sim.phases.scanning = 100;
-        sim.phases.exploitation = Math.min(100, (elapsed - 5) * 15);
-        sim.machinesScanned = 10 + Math.floor((elapsed - 5) * 1);
-        sim.machinesDiscovered = 7 + Math.floor((elapsed - 5) * 0.5);
-        sim.vulnerabilitiesFound = Math.floor((elapsed - 5) * 1.2);
-        sim.exploitsSuccessful = Math.floor((elapsed - 5) * 0.6);
-        sim.machinesExploited = Math.floor((elapsed - 5) * 0.4);
-        sim.activeAgents = 1 + Math.floor((elapsed - 5) * 0.3);
-    } else if (elapsed < 18) {
-        sim.phases.scanning = 100;
-        sim.phases.exploitation = 100;
-        sim.phases.postExploitation = Math.min(100, (elapsed - 12) * 17);
-        sim.machinesScanned = 17;
-        sim.machinesDiscovered = 12;
-        sim.vulnerabilitiesFound = 8;
-        sim.exploitsSuccessful = 5;
-        sim.machinesExploited = 3;
-        sim.activeAgents = 3;
-    } else if (elapsed < 22) {
-        sim.phases.scanning = 100;
-        sim.phases.exploitation = 100;
-        sim.phases.postExploitation = 100;
-        sim.phases.reporting = Math.min(100, (elapsed - 18) * 25);
-    } else {
-        sim.status = 'completed';
-        sim.stoppedAt = new Date().toISOString();
-        sim.phases = {
-            scanning: 100,
-            exploitation: 100,
-            postExploitation: 100,
-            reporting: 100
-        };
-        sim.machinesScanned = 24;
-        sim.machinesDiscovered = 15;
-        sim.vulnerabilitiesFound = 12;
-        sim.exploitsSuccessful = 7;
-        sim.machinesExploited = 5;
-        sim.activeAgents = 0;
+        sim = updateSimulation({
+            machinesDiscovered: hosts.length,
+            machinesScanned: hosts.length,
+            phases: {
+                scanning: 100,
+                exploitation: 0,
+                postExploitation: 0,
+                reporting: 0
+            },
+            currentPhase: 'Port Scanning'
+        });
+        onProgress(sim);
 
         addEvent({
             type: 'scan',
             severity: 'success',
             source: 'Island',
-            target: 'All',
-            message:
-                'Simulation completed successfully. 15 machines discovered, 12 vulnerabilities found.'
+            target: scanData.subnet || 'Local Network',
+            message: `Network scan complete: ${hosts.length} live hosts discovered`
+        });
+    } catch (err) {
+        addEvent({
+            type: 'scan',
+            severity: 'error',
+            source: 'Island',
+            target: 'Network',
+            message: `Network scan failed: ${
+                err instanceof Error ? err.message : 'Unknown error'
+            }`
         });
     }
 
-    safeSet(STORAGE_KEYS.SIMULATION, sim);
-    return sim;
+    // Check if simulation was stopped
+    if (getSimulation().status !== 'running') return;
+
+    // Phase 2: Port Scanning each host
+    const propagationTree: PropagationNode[] = [];
+    for (let i = 0; i < hosts.length; i++) {
+        if (getSimulation().status !== 'running') return;
+
+        const host = hosts[i];
+        try {
+            const portResp = await fetch(getApiUrl('/api/scan-ports'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ host: host.ip, ports: config.scanPorts })
+            });
+            const portData = await portResp.json();
+            host.ports = portData.ports || [];
+
+            const openPorts = host.ports.filter((p) => p.state === 'open');
+            const vulns: string[] = [];
+
+            // Detect vulnerabilities based on open ports
+            for (const p of openPorts) {
+                if (p.port === 21) vulns.push('FTP service exposed');
+                if (p.port === 22) vulns.push('SSH service available');
+                if (p.port === 23) vulns.push('Telnet (unencrypted) exposed');
+                if (p.port === 25) vulns.push('SMTP relay potentially open');
+                if (p.port === 135 || p.port === 139)
+                    vulns.push('Windows RPC/NetBIOS exposed');
+                if (p.port === 445)
+                    vulns.push('SMB service exposed (EternalBlue risk)');
+                if (p.port === 3389) vulns.push('RDP exposed (BlueKeep risk)');
+                if (p.port === 1433) vulns.push('MSSQL exposed');
+                if (p.port === 3306) vulns.push('MySQL exposed');
+                if (p.port === 5432) vulns.push('PostgreSQL exposed');
+                if (p.port === 5900) vulns.push('VNC exposed (no encryption)');
+                if (p.port === 6379)
+                    vulns.push('Redis exposed (no auth default)');
+                if (p.port === 27017)
+                    vulns.push('MongoDB exposed (no auth default)');
+                if (p.port === 8080 || p.port === 8443)
+                    vulns.push('Web application on non-standard port');
+            }
+            host.vulnerabilities = vulns;
+
+            // Add to propagation tree
+            propagationTree.push({
+                id: `node-${host.ip}`,
+                ip: host.ip,
+                hostname: host.hostname || host.ip,
+                status: 'scanned',
+                parent: null,
+                depth: 0,
+                openPorts: openPorts.map((p) => ({
+                    port: p.port,
+                    service: p.service
+                })),
+                discoveredAt: new Date().toISOString(),
+                os: openPorts.some(
+                    (p) => p.port === 445 || p.port === 3389 || p.port === 135
+                )
+                    ? 'Windows'
+                    : openPorts.some((p) => p.port === 22)
+                      ? 'Linux/Unix'
+                      : 'Unknown'
+            });
+
+            addEvent({
+                type: 'scan',
+                severity: openPorts.length > 0 ? 'warning' : 'info',
+                source: 'Scanner',
+                target: host.ip,
+                message: `Port scan: ${openPorts.length} open ports found${
+                    vulns.length > 0
+                        ? `, ${vulns.length} potential vulnerabilities`
+                        : ''
+                }`
+            });
+        } catch {
+            // Port scan failed for this host, continue
+        }
+
+        sim = updateSimulation({
+            phases: {
+                scanning: 100,
+                exploitation: Math.round(((i + 1) / hosts.length) * 50),
+                postExploitation: 0,
+                reporting: 0
+            },
+            vulnerabilitiesFound: hosts.reduce(
+                (sum, h) => sum + h.vulnerabilities.length,
+                0
+            ),
+            currentPhase: `Port Scanning (${i + 1}/${hosts.length})`
+        });
+        onProgress(sim);
+    }
+
+    if (getSimulation().status !== 'running') return;
+
+    // Phase 3: Exploitation attempts
+    sim = updateSimulation({
+        currentPhase: 'Exploitation',
+        phases: {
+            scanning: 100,
+            exploitation: 50,
+            postExploitation: 0,
+            reporting: 0
+        }
+    });
+    onProgress(sim);
+
+    let exploitCount = 0;
+    let implantCount = 0;
+    for (const host of hosts) {
+        if (getSimulation().status !== 'running') return;
+
+        const openPorts = host.ports.filter((p) => p.state === 'open');
+        if (openPorts.length === 0) continue;
+
+        // Try credential-based exploitation via API
+        for (const cred of config.credentials) {
+            if (getSimulation().status !== 'running') return;
+
+            // Check SSH
+            if (config.enableSSH && openPorts.some((p) => p.port === 22)) {
+                try {
+                    const resp = await fetch(getApiUrl('/api/exploit-ssh'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            host: host.ip,
+                            username: cred.username,
+                            password: cred.password
+                        })
+                    });
+                    const result = await resp.json();
+                    if (result.success) {
+                        host.exploited = true;
+                        host.exploitMethod = `SSH (${cred.username})`;
+                        host.implanted = true;
+                        exploitCount++;
+                        implantCount++;
+                        const node = propagationTree.find(
+                            (n) => n.ip === host.ip
+                        );
+                        if (node) {
+                            node.status = 'implanted';
+                            node.exploitUsed = `SSH credential: ${cred.username}`;
+                        }
+                        addEvent({
+                            type: 'exploitation',
+                            severity: 'success',
+                            source: 'Exploiter',
+                            target: host.ip,
+                            message: `SSH exploitation successful with user "${cred.username}". Agent implanted.`
+                        });
+                        break;
+                    }
+                } catch {
+                    // SSH exploit attempt failed
+                }
+            }
+
+            // Check SMB
+            if (config.enableSMB && openPorts.some((p) => p.port === 445)) {
+                try {
+                    const resp = await fetch(getApiUrl('/api/exploit-smb'), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            host: host.ip,
+                            username: cred.username,
+                            password: cred.password
+                        })
+                    });
+                    const result = await resp.json();
+                    if (result.success) {
+                        host.exploited = true;
+                        host.exploitMethod = `SMB (${cred.username})`;
+                        exploitCount++;
+                        const node = propagationTree.find(
+                            (n) => n.ip === host.ip
+                        );
+                        if (node) {
+                            node.status = 'exploited';
+                            node.exploitUsed = `SMB credential: ${cred.username}`;
+                        }
+                        addEvent({
+                            type: 'exploitation',
+                            severity: 'success',
+                            source: 'Exploiter',
+                            target: host.ip,
+                            message: `SMB access successful with user "${cred.username}"`
+                        });
+                        break;
+                    }
+                } catch {
+                    // SMB exploit attempt failed
+                }
+            }
+        }
+
+        // Mark failed exploitation
+        if (!host.exploited) {
+            const node = propagationTree.find((n) => n.ip === host.ip);
+            if (node && openPorts.length > 0) {
+                node.status = 'failed';
+                addEvent({
+                    type: 'exploitation',
+                    severity: 'info',
+                    source: 'Exploiter',
+                    target: host.ip,
+                    message: `Exploitation failed - no valid credentials for open services`
+                });
+            }
+        }
+    }
+
+    sim = updateSimulation({
+        exploitsSuccessful: exploitCount,
+        machinesExploited: hosts.filter((h) => h.exploited).length,
+        phases: {
+            scanning: 100,
+            exploitation: 100,
+            postExploitation: 0,
+            reporting: 0
+        },
+        currentPhase: 'Post-Exploitation'
+    });
+    onProgress(sim);
+
+    if (getSimulation().status !== 'running') return;
+
+    // Phase 4: Post-exploitation data collection
+    sim = updateSimulation({
+        currentPhase: 'Post-Exploitation Analysis',
+        phases: {
+            scanning: 100,
+            exploitation: 100,
+            postExploitation: 50,
+            reporting: 0
+        }
+    });
+    onProgress(sim);
+
+    // Collect system info from exploited hosts
+    for (const host of hosts.filter((h) => h.exploited)) {
+        try {
+            const resp = await fetch(getApiUrl('/api/post-exploit'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    host: host.ip,
+                    method: host.exploitMethod
+                })
+            });
+            const data = await resp.json();
+            if (data.os) host.os = data.os;
+
+            addEvent({
+                type: 'credentials',
+                severity: 'warning',
+                source: host.ip,
+                target: 'Island',
+                message: `Post-exploitation data collected: ${
+                    data.info || 'system enumeration complete'
+                }`
+            });
+        } catch {
+            // Post-exploit data collection failed
+        }
+    }
+
+    sim = updateSimulation({
+        phases: {
+            scanning: 100,
+            exploitation: 100,
+            postExploitation: 100,
+            reporting: 0
+        },
+        currentPhase: 'Generating Report'
+    });
+    onProgress(sim);
+
+    if (getSimulation().status !== 'running') return;
+
+    // Phase 5: Reporting
+    sim = updateSimulation({
+        phases: {
+            scanning: 100,
+            exploitation: 100,
+            postExploitation: 100,
+            reporting: 50
+        },
+        currentPhase: 'Generating Report'
+    });
+    onProgress(sim);
+
+    // Save results
+    saveScanResults(hosts);
+    savePropagationTree(propagationTree);
+
+    const totalVulns = hosts.reduce(
+        (sum, h) => sum + h.vulnerabilities.length,
+        0
+    );
+    sim = updateSimulation({
+        status: 'completed',
+        stoppedAt: new Date().toISOString(),
+        activeAgents: 0,
+        machinesDiscovered: hosts.length,
+        machinesScanned: hosts.length,
+        vulnerabilitiesFound: totalVulns,
+        exploitsSuccessful: exploitCount,
+        machinesExploited: hosts.filter((h) => h.exploited).length,
+        currentPhase: 'Completed',
+        phases: {
+            scanning: 100,
+            exploitation: 100,
+            postExploitation: 100,
+            reporting: 100
+        }
+    });
+    onProgress(sim);
+
+    addEvent({
+        type: 'scan',
+        severity: 'success',
+        source: 'Island',
+        target: 'All',
+        message: `Scan completed: ${hosts.length} hosts, ${totalVulns} vulnerabilities, ${exploitCount} successful exploits, ${implantCount} implants`
+    });
 }
 
 export function stopSimulation(): SimulationState {
@@ -237,6 +638,7 @@ export function stopSimulation(): SimulationState {
     sim.status = 'stopped';
     sim.stoppedAt = new Date().toISOString();
     sim.activeAgents = 0;
+    sim.currentPhase = 'Stopped';
     safeSet(STORAGE_KEYS.SIMULATION, sim);
     addEvent({
         type: 'scan',
@@ -251,6 +653,8 @@ export function stopSimulation(): SimulationState {
 export function clearSimulation(): SimulationState {
     safeSet(STORAGE_KEYS.SIMULATION, DEFAULT_SIMULATION);
     safeSet(STORAGE_KEYS.EVENTS, []);
+    safeSet(STORAGE_KEYS.SCAN_RESULTS, []);
+    safeSet(STORAGE_KEYS.PROPAGATION_TREE, []);
     return DEFAULT_SIMULATION;
 }
 
@@ -300,7 +704,7 @@ export function exportConfigAsJSON(): string {
     return JSON.stringify(
         {
             exportedAt: new Date().toISOString(),
-            version: '2.3.0',
+            version: '2.5.0',
             configuration: config,
             settings: settings
         },

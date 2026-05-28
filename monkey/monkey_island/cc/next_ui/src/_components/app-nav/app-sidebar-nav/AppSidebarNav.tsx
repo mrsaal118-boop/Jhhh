@@ -21,6 +21,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import InfoIcon from '@mui/icons-material/Info';
 import EventNoteIcon from '@mui/icons-material/EventNote';
 import SecurityIcon from '@mui/icons-material/Security';
+import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import LogoutButton from '@/_components/logout-button/LogoutButton';
 import { PATHS } from '@/constants/paths.constants';
 
@@ -40,6 +41,11 @@ const mainNavItems: NavItem[] = [
     { path: PATHS.CONFIGURE, label: 'Configure', icon: <TuneIcon /> },
     { path: PATHS.RUN, label: 'Run Monkey', icon: <PlayArrowIcon /> },
     { path: PATHS.NETWORK_MAP, label: 'Network Map', icon: <MapIcon /> },
+    {
+        path: PATHS.PROPAGATION_TREE,
+        label: 'Propagation Tree',
+        icon: <AccountTreeIcon />
+    },
     { path: PATHS.EVENTS, label: 'Events', icon: <EventNoteIcon /> }
 ];
 

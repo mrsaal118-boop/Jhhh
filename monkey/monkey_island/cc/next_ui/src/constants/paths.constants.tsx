@@ -10,7 +10,8 @@ export enum PATHS {
     ROOT = '/',
     RUN = '/run',
     SETTINGS = '/settings',
-    EVENTS = '/events'
+    EVENTS = '/events',
+    PROPAGATION_TREE = '/propagation-tree'
 }
 
 export const getApiPath = () => {
