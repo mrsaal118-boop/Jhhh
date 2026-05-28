@@ -368,8 +368,9 @@ function startNextServer(port) {
             cwd: cwd,
             env: {
                 ...process.env,
+                ELECTRON_RUN_AS_NODE: '1',
                 PORT: String(port),
-                HOSTNAME: 'localhost',
+                HOSTNAME: '127.0.0.1',
                 NODE_ENV: 'production'
             },
             stdio: 'pipe'
@@ -515,7 +516,20 @@ function createWindow(port) {
         `).catch(() => {});
     });
 
-    mainWindow.loadURL(`http://localhost:${port}`);
+    // Retry loading URL until the server is ready
+    const loadWithRetry = (url, retries = 10) => {
+        mainWindow.loadURL(url).catch((err) => {
+            console.error(`Failed to load ${url}:`, err.message);
+            if (retries > 0) {
+                setTimeout(() => loadWithRetry(url, retries - 1), 2000);
+            } else {
+                // After all retries, show error page
+                mainWindow.loadURL(`data:text/html,<html><body style="background:#0A0E17;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><h1>Startup Error</h1><p>Could not connect to internal server.</p><p>Please restart the application.</p></div></body></html>`);
+            }
+        });
+    };
+
+    loadWithRetry(`http://127.0.0.1:${port}`);
 
     mainWindow.once('ready-to-show', () => {
         mainWindow.show();
