@@ -64,6 +64,14 @@ export interface ScanResult {
     exploited: boolean;
     exploitMethod?: string;
     implanted: boolean;
+    attackTechniques?: {
+        id: string;
+        name: string;
+        tactic: string;
+        success: boolean;
+    }[];
+    toolsUsed?: string[];
+    postExploitData?: Record<string, string>;
 }
 
 export interface PropagationNode {
@@ -77,6 +85,9 @@ export interface PropagationNode {
     exploitUsed?: string;
     discoveredAt: string;
     os?: string;
+    attackTechniques?: string[];
+    toolsUsed?: string[];
+    admin?: boolean;
 }
 
 export interface AppSettings {
@@ -474,18 +485,32 @@ export async function runRealSimulation(
             });
             const result = await resp.json();
 
+            // Store ATT&CK mapping and tools used
+            const techniques =
+                result.attackMapping?.techniques?.map((t: string) => t) || [];
+            const toolsUsed = result.toolsUsed || [];
+            host.attackTechniques = techniques.map((t: string) => ({
+                id: t,
+                name: t,
+                tactic: 'exploitation',
+                success: result.success
+            }));
+            host.toolsUsed = toolsUsed;
+
             if (result.success) {
                 host.exploited = true;
                 host.exploitMethod = `${result.method} (${
                     result.username || 'no-auth'
-                })`;
+                })${result.admin ? ' [ADMIN]' : ''}`;
                 exploitCount++;
 
                 const isImplant =
                     result.method === 'SSH' ||
                     result.method === 'Telnet' ||
                     result.method === 'Redis-NoAuth' ||
-                    result.method === 'MongoDB-NoAuth';
+                    result.method === 'MongoDB-NoAuth' ||
+                    result.method?.startsWith('Impacket-') ||
+                    result.method?.startsWith('NetExec-');
                 if (isImplant) {
                     host.implanted = true;
                     implantCount++;
@@ -497,7 +522,15 @@ export async function runRealSimulation(
                     node.exploitUsed = `${result.method}: ${
                         result.username || 'no-auth'
                     }`;
+                    node.attackTechniques = techniques;
+                    node.toolsUsed = toolsUsed;
+                    node.admin = result.admin || false;
                 }
+
+                const toolInfo =
+                    toolsUsed.length > 0
+                        ? ` [Tools: ${toolsUsed.join(', ')}]`
+                        : '';
                 addEvent({
                     type: 'exploitation',
                     severity: 'success',
@@ -507,12 +540,26 @@ export async function runRealSimulation(
                         result.username
                             ? ` (user: ${result.username})`
                             : ' (no-auth)'
-                    }${isImplant ? ' - Agent implanted!' : ''}`
+                    }${result.admin ? ' [ADMIN ACCESS]' : ''}${
+                        isImplant ? ' - Agent implanted!' : ''
+                    }${toolInfo}`
                 });
+
+                // Log ATT&CK techniques used
+                if (techniques.length > 0) {
+                    addEvent({
+                        type: 'exploitation',
+                        severity: 'info',
+                        source: 'ATT&CK',
+                        target: host.ip,
+                        message: `MITRE ATT&CK: ${techniques.join(', ')}`
+                    });
+                }
             } else {
                 const node = propagationTree.find((n) => n.ip === host.ip);
                 if (node) {
                     node.status = 'failed';
+                    node.toolsUsed = toolsUsed;
                 }
                 const attemptCount = result.allResults?.length || 0;
                 addEvent({
@@ -520,7 +567,13 @@ export async function runRealSimulation(
                     severity: 'info',
                     source: 'Exploiter',
                     target: host.ip,
-                    message: `All ${attemptCount} exploitation attempts failed against ${host.ip}`
+                    message: `All ${attemptCount} exploitation attempts failed against ${
+                        host.ip
+                    }${
+                        toolsUsed.length > 0
+                            ? ` [Tools tried: ${toolsUsed.join(', ')}]`
+                            : ''
+                    }`
                 });
             }
         } catch {

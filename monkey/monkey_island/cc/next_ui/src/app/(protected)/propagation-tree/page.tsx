@@ -754,6 +754,99 @@ export default function PropagationTreePage() {
                                     )}
                                 </Alert>
                             )}
+
+                            {/* ATT&CK Techniques */}
+                            {selectedNode.attackTechniques &&
+                                selectedNode.attackTechniques.length > 0 && (
+                                    <Box sx={{ mt: 2 }}>
+                                        <Typography
+                                            variant="subtitle2"
+                                            sx={{
+                                                fontWeight: 700,
+                                                color: '#e91e63',
+                                                mb: 1
+                                            }}>
+                                            MITRE ATT&CK Techniques
+                                        </Typography>
+                                        <Box
+                                            sx={{
+                                                display: 'flex',
+                                                flexWrap: 'wrap',
+                                                gap: 0.5
+                                            }}>
+                                            {selectedNode.attackTechniques.map(
+                                                (t, i) => (
+                                                    <Chip
+                                                        key={i}
+                                                        label={t}
+                                                        size="small"
+                                                        sx={{
+                                                            bgcolor:
+                                                                'rgba(233,30,99,0.15)',
+                                                            color: '#e91e63',
+                                                            fontSize: '0.65rem'
+                                                        }}
+                                                    />
+                                                )
+                                            )}
+                                        </Box>
+                                    </Box>
+                                )}
+
+                            {/* Tools Used */}
+                            {selectedNode.toolsUsed &&
+                                selectedNode.toolsUsed.length > 0 && (
+                                    <Box sx={{ mt: 1.5 }}>
+                                        <Typography
+                                            variant="subtitle2"
+                                            sx={{
+                                                fontWeight: 700,
+                                                color: '#2196f3',
+                                                mb: 1
+                                            }}>
+                                            Tools Used
+                                        </Typography>
+                                        <Box
+                                            sx={{
+                                                display: 'flex',
+                                                flexWrap: 'wrap',
+                                                gap: 0.5
+                                            }}>
+                                            {selectedNode.toolsUsed.map(
+                                                (t, i) => (
+                                                    <Chip
+                                                        key={i}
+                                                        label={t}
+                                                        size="small"
+                                                        variant="outlined"
+                                                        sx={{
+                                                            color: '#2196f3',
+                                                            borderColor:
+                                                                '#2196f3',
+                                                            fontSize: '0.65rem'
+                                                        }}
+                                                    />
+                                                )
+                                            )}
+                                        </Box>
+                                    </Box>
+                                )}
+
+                            {/* Admin Badge */}
+                            {selectedNode.admin && (
+                                <Alert
+                                    severity="warning"
+                                    sx={{
+                                        mt: 1.5,
+                                        backgroundColor:
+                                            'rgba(255, 152, 0, 0.08)'
+                                    }}>
+                                    <Typography variant="body2">
+                                        <strong>ADMIN ACCESS</strong> - Full
+                                        administrative privileges obtained
+                                    </Typography>
+                                </Alert>
+                            )}
                         </DialogContent>
                     </>
                 )}

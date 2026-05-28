@@ -51,6 +51,11 @@ const mainNavItems: NavItem[] = [
 
 const analysisNavItems: NavItem[] = [
     { path: PATHS.REPORT, label: 'Reports', icon: <AssessmentIcon /> },
+    {
+        path: PATHS.ATTACK_MATRIX,
+        label: 'ATT&CK Matrix',
+        icon: <SecurityIcon />
+    },
     { path: PATHS.PLUGINS, label: 'Plugins', icon: <ExtensionIcon /> }
 ];
 
