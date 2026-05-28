@@ -14,8 +14,7 @@ import { useRouter } from 'next/navigation';
 import { PATHS } from '@/constants/paths.constants';
 import { useTheme } from '@mui/material/styles';
 import { cardStyle, containerStyle } from '@/app/(auth)/login/style';
-
-const API_PORT = 17813;
+import { getApiUrl } from '@/lib/apiPort';
 
 const LoginPage = () => {
     const router = useRouter();
@@ -43,9 +42,7 @@ const LoginPage = () => {
 
     const checkRegistrationStatus = async () => {
         try {
-            const resp = await fetch(
-                `http://localhost:${API_PORT}/api/registration-status`
-            );
+            const resp = await fetch(getApiUrl('/api/registration-status'));
             if (resp.ok) {
                 const data = await resp.json();
                 setIsRegistration(data.registration_needed);
@@ -86,14 +83,11 @@ const LoginPage = () => {
 
         try {
             const endpoint = isRegistration ? '/api/register' : '/api/login';
-            const resp = await fetch(
-                `http://localhost:${API_PORT}${endpoint}`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(formValues)
-                }
-            );
+            const resp = await fetch(getApiUrl(endpoint), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formValues)
+            });
 
             if (resp.ok) {
                 const data = await resp.json();

@@ -10,7 +10,20 @@ const crypto = require('crypto');
 let mainWindow;
 let httpServer;
 const isDev = process.env.NODE_ENV === 'development';
-const APP_PORT = 17812;
+
+// Find an available port starting from the given one
+function findAvailablePort(startPort) {
+    return new Promise((resolve) => {
+        const server = net.createServer();
+        server.listen(startPort, '127.0.0.1', () => {
+            const port = server.address().port;
+            server.close(() => resolve(port));
+        });
+        server.on('error', () => {
+            resolve(findAvailablePort(startPort + 1));
+        });
+    });
+}
 
 // Get app data directory for persistent storage
 function getAppDataPath() {
@@ -383,7 +396,7 @@ function startNextServer(port) {
 }
 
 function createWindow(port) {
-    const apiPort = port + 1;
+    const apiPort = global.apiPort || (port + 1);
 
     mainWindow = new BrowserWindow({
         width: 1400,
@@ -614,19 +627,34 @@ app.whenReady().then(async () => {
     const splash = createSplashWindow();
 
     try {
+        // Find available ports dynamically
+        const apiPort = await findAvailablePort(17813);
+        const appPort = await findAvailablePort(17812);
+
+        console.log(`Using API port: ${apiPort}, App port: ${appPort}`);
+
+        // Store API port globally so createWindow can access it
+        global.apiPort = apiPort;
+
         // Start the API server
         const apiServer = createAPIServer();
-        const apiPort = APP_PORT + 1;
-        apiServer.listen(apiPort, 'localhost', () => {
-            console.log(`API server running on port ${apiPort}`);
+        await new Promise((resolve, reject) => {
+            apiServer.on('error', (err) => {
+                console.error('API server error:', err);
+                reject(err);
+            });
+            apiServer.listen(apiPort, '127.0.0.1', () => {
+                console.log(`API server running on port ${apiPort}`);
+                resolve();
+            });
         });
         global.apiServer = apiServer;
 
         if (isDev) {
             createWindow(3000);
         } else {
-            await startNextServer(APP_PORT);
-            createWindow(APP_PORT);
+            await startNextServer(appPort);
+            createWindow(appPort);
         }
 
         splash.close();

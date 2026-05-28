@@ -23,8 +23,7 @@ import SearchIcon from '@mui/icons-material/Search';
 import ComputerIcon from '@mui/icons-material/Computer';
 import WifiIcon from '@mui/icons-material/Wifi';
 import { addEvent } from '@/lib/appState';
-
-const API_PORT = 17813;
+import { getApiUrl } from '@/lib/apiPort';
 
 interface DiscoveredHost {
     ip: string;
@@ -51,18 +50,15 @@ export default function NetworkMapPage() {
         setHosts([]);
 
         try {
-            const resp = await fetch(
-                `http://localhost:${API_PORT}/api/scan-network`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        subnet: subnet || undefined
-                    })
-                }
-            );
+            const resp = await fetch(getApiUrl('/api/scan-network'), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    subnet: subnet || undefined
+                })
+            });
 
             if (resp.ok) {
                 const data = await resp.json();
@@ -92,23 +88,19 @@ export default function NetworkMapPage() {
         setSelectedHost(host);
 
         try {
-            const resp = await fetch(
-                `http://localhost:${API_PORT}/api/scan-ports`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        host: host.ip,
-                        ports: [
-                            21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993,
-                            995, 1433, 3306, 3389, 5432, 5900, 6379, 8080, 8443,
-                            27017
-                        ]
-                    })
-                }
-            );
+            const resp = await fetch(getApiUrl('/api/scan-ports'), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    host: host.ip,
+                    ports: [
+                        21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995,
+                        1433, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 27017
+                    ]
+                })
+            });
 
             if (resp.ok) {
                 const data = await resp.json();
