@@ -343,6 +343,34 @@ export async function runRealSimulation(
             }
             host.vulnerabilities = vulns;
 
+            // OS fingerprinting via API
+            let detectedOS = openPorts.some(
+                (p) => p.port === 445 || p.port === 3389 || p.port === 135
+            )
+                ? 'Windows'
+                : openPorts.some((p) => p.port === 22)
+                  ? 'Linux/Unix'
+                  : 'Unknown';
+            try {
+                const osResp = await fetch(getApiUrl('/api/fingerprint-os'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        host: host.ip,
+                        openPorts: openPorts.map((p) => ({
+                            port: p.port,
+                            service: p.service
+                        }))
+                    })
+                });
+                const osData = await osResp.json();
+                if (osData.os && osData.os !== 'Unknown')
+                    detectedOS = osData.os;
+            } catch {
+                // OS fingerprinting failed, use heuristic
+            }
+            host.os = detectedOS;
+
             // Add to propagation tree
             propagationTree.push({
                 id: `node-${host.ip}`,
@@ -356,13 +384,7 @@ export async function runRealSimulation(
                     service: p.service
                 })),
                 discoveredAt: new Date().toISOString(),
-                os: openPorts.some(
-                    (p) => p.port === 445 || p.port === 3389 || p.port === 135
-                )
-                    ? 'Windows'
-                    : openPorts.some((p) => p.port === 22)
-                      ? 'Linux/Unix'
-                      : 'Unknown'
+                os: detectedOS
             });
 
             addEvent({

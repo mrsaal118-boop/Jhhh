@@ -267,6 +267,26 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Service banner grabbing
+    if (urlPath === '/api/grab-banner' && method === 'POST') {
+        const data = JSON.parse(body);
+        grabServiceBanner(data.host, data.port, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // OS fingerprinting
+    if (urlPath === '/api/fingerprint-os' && method === 'POST') {
+        const data = JSON.parse(body);
+        fingerprintOS(data.host, data.openPorts || [], (os) => {
+            res.writeHead(200);
+            res.end(JSON.stringify({ host: data.host, os }));
+        });
+        return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'Not found' }));
 }
@@ -452,123 +472,258 @@ function performPortScan(host, ports, callback) {
     });
 }
 
-// SSH exploitation: attempt real TCP connection to SSH port with banner grab
-function attemptSSHExploit(host, username, password, callback) {
+// ===== ENHANCED MONKEY EXPLOITATION ENGINE =====
+
+// Service banner grabber - grabs banners from any TCP service
+function grabServiceBanner(host, port, callback) {
     const socket = new net.Socket();
     socket.setTimeout(5000);
     let banner = '';
 
     socket.on('connect', () => {
-        // Connected to SSH port - grab banner
-        socket.on('data', (data) => {
-            banner += data.toString();
-            // SSH banner received - this means SSH is accepting connections
-            // In a real pentest tool, we would use an SSH library to authenticate
-            // For now, we verify the service is accessible and report it
-            socket.destroy();
+        // Some services send banner on connect, others need a probe
+        const probes = {
+            21: 'USER anonymous\r\n',
+            25: 'EHLO monkey\r\n',
+            80: 'HEAD / HTTP/1.0\r\nHost: ' + host + '\r\n\r\n',
+            110: 'USER test\r\n',
+            143: 'a001 CAPABILITY\r\n',
+            8080: 'HEAD / HTTP/1.0\r\nHost: ' + host + '\r\n\r\n',
+            8443: 'HEAD / HTTP/1.0\r\nHost: ' + host + '\r\n\r\n'
+        };
 
-            // Try to exec ssh command for real authentication (non-interactive)
-            const isWin = process.platform === 'win32';
-            if (!isWin) {
-                // On Linux/Mac, attempt real SSH with sshpass if available
-                exec(`which sshpass`, { timeout: 2000 }, (err) => {
-                    if (!err) {
-                        exec(`sshpass -p '${password.replace(/'/g, "\\'")}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=no ${username}@${host} "echo MONKEY_SUCCESS" 2>&1`, { timeout: 10000 }, (error, stdout) => {
-                            if (stdout && stdout.includes('MONKEY_SUCCESS')) {
-                                callback({ success: true, method: 'SSH', banner: banner.trim(), host, username });
-                            } else {
-                                callback({ success: false, method: 'SSH', banner: banner.trim(), error: 'Authentication failed' });
-                            }
-                        });
-                    } else {
-                        // No sshpass - just report SSH is open and banner
-                        callback({ success: false, method: 'SSH', banner: banner.trim(), error: 'SSH service accessible but sshpass not available for auth test' });
-                    }
-                });
-            } else {
-                callback({ success: false, method: 'SSH', banner: banner.trim(), error: 'SSH service accessible, credential test requires sshpass' });
+        setTimeout(() => {
+            if (probes[port]) {
+                socket.write(probes[port]);
             }
-        });
+        }, 500);
+    });
+
+    socket.on('data', (data) => {
+        banner += data.toString();
+        if (banner.length > 500) {
+            socket.destroy();
+            callback({ port, banner: banner.substring(0, 500).trim() });
+        }
     });
 
     socket.on('timeout', () => {
         socket.destroy();
-        callback({ success: false, method: 'SSH', error: 'Connection timeout' });
+        callback({ port, banner: banner.trim() || null });
     });
 
-    socket.on('error', (err) => {
-        callback({ success: false, method: 'SSH', error: err.message });
+    socket.on('error', () => {
+        callback({ port, banner: null });
     });
 
+    socket.on('close', () => {
+        callback({ port, banner: banner.trim() || null });
+    });
+
+    socket.connect(port, host);
+}
+
+// OS fingerprinting via TCP/IP stack analysis
+function fingerprintOS(host, openPorts, callback) {
+    let os = 'Unknown';
+    const portSet = new Set(openPorts.map(p => p.port));
+
+    // Heuristic-based OS detection
+    if (portSet.has(445) || portSet.has(135) || portSet.has(139) || portSet.has(3389)) {
+        os = 'Windows';
+        if (portSet.has(3389)) os = 'Windows (RDP enabled)';
+        if (portSet.has(1433)) os = 'Windows (SQL Server)';
+    } else if (portSet.has(22)) {
+        os = 'Linux/Unix';
+        if (portSet.has(8080) || portSet.has(8443)) os = 'Linux (Web Server)';
+        if (portSet.has(3306)) os = 'Linux (MySQL)';
+        if (portSet.has(5432)) os = 'Linux (PostgreSQL)';
+        if (portSet.has(6379)) os = 'Linux (Redis)';
+        if (portSet.has(27017)) os = 'Linux (MongoDB)';
+    } else if (portSet.has(80) || portSet.has(443)) {
+        os = 'Network Device / Web Server';
+    } else if (portSet.has(23)) {
+        os = 'Network Device (Telnet)';
+    }
+
+    // Try TTL-based OS detection via ping
+    const isWin = process.platform === 'win32';
+    const pingCmd = isWin ? `ping -n 1 -w 2000 ${host}` : `ping -c 1 -W 2 ${host}`;
+    exec(pingCmd, { timeout: 5000 }, (err, stdout) => {
+        if (stdout) {
+            const ttlMatch = stdout.match(/ttl[=:](\d+)/i);
+            if (ttlMatch) {
+                const ttl = parseInt(ttlMatch[1]);
+                if (ttl <= 64 && ttl > 0) {
+                    if (os === 'Unknown') os = 'Linux/Unix (TTL≤64)';
+                } else if (ttl <= 128 && ttl > 64) {
+                    if (os === 'Unknown') os = 'Windows (TTL≤128)';
+                } else if (ttl <= 255 && ttl > 128) {
+                    if (os === 'Unknown') os = 'Network Device (TTL≤255)';
+                }
+            }
+        }
+        callback(os);
+    });
+}
+
+// SSH exploitation with real credential testing
+function attemptSSHExploit(host, username, password, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+    let banner = '';
+    let dataReceived = false;
+
+    socket.on('connect', () => {
+        socket.on('data', (data) => {
+            if (dataReceived) return;
+            dataReceived = true;
+            banner = data.toString().trim();
+            socket.destroy();
+
+            const isWin = process.platform === 'win32';
+            if (isWin) {
+                // Windows: use plink if available, otherwise report banner
+                exec(`where plink 2>nul`, { timeout: 2000 }, (err) => {
+                    if (!err) {
+                        exec(`echo y | plink -ssh -l ${username} -pw ${password} ${host} "echo MONKEY_SUCCESS" 2>&1`, { timeout: 15000 }, (error, stdout) => {
+                            callback({
+                                success: stdout && stdout.includes('MONKEY_SUCCESS'),
+                                method: 'SSH', banner, host, username,
+                                info: stdout && stdout.includes('MONKEY_SUCCESS') ? 'Full SSH access gained' : 'Auth failed'
+                            });
+                        });
+                    } else {
+                        // Try ssh.exe (Windows 10+)
+                        const escapedPass = password.replace(/"/g, '\\"');
+                        exec(`echo ${escapedPass} | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${username}@${host} "echo MONKEY_SUCCESS" 2>&1`, { timeout: 15000 }, (error, stdout) => {
+                            callback({
+                                success: stdout && stdout.includes('MONKEY_SUCCESS'),
+                                method: 'SSH', banner, host, username,
+                                info: 'SSH connection attempted via ssh.exe'
+                            });
+                        });
+                    }
+                });
+            } else {
+                // Linux/Mac: try sshpass first, then expect
+                exec(`which sshpass 2>/dev/null`, { timeout: 2000 }, (err) => {
+                    if (!err) {
+                        const escapedPass = password.replace(/'/g, "'\\''");
+                        exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=no ${username}@${host} "echo MONKEY_SUCCESS && uname -a && id && hostname" 2>&1`, { timeout: 15000 }, (error, stdout) => {
+                            const success = stdout && stdout.includes('MONKEY_SUCCESS');
+                            callback({
+                                success, method: 'SSH', banner, host, username,
+                                info: success ? stdout.replace('MONKEY_SUCCESS', '').trim() : 'Authentication failed',
+                                sysInfo: success ? stdout : null
+                            });
+                        });
+                    } else {
+                        // Fallback: try without sshpass using expect-like approach
+                        exec(`ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o NumberOfPasswordPrompts=0 ${username}@${host} exit 2>&1`, { timeout: 8000 }, (error, stdout) => {
+                            const hasKeyAuth = !error;
+                            callback({
+                                success: hasKeyAuth,
+                                method: 'SSH', banner, host, username,
+                                info: hasKeyAuth ? 'Key-based auth succeeded' : 'SSH open, install sshpass for credential testing'
+                            });
+                        });
+                    }
+                });
+            }
+        });
+    });
+
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'SSH', error: 'Connection timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'SSH', error: err.message }); });
     socket.connect(22, host);
 }
 
-// SMB exploitation: attempt real TCP connection to SMB port
+// SMB exploitation with real credential testing
 function attemptSMBExploit(host, username, password, callback) {
     const socket = new net.Socket();
     socket.setTimeout(5000);
 
     socket.on('connect', () => {
         socket.destroy();
-        // SMB port is open - try net use on Windows or smbclient on Linux
         const isWin = process.platform === 'win32';
         if (isWin) {
-            exec(`net use \\\\${host}\\IPC$ /user:${username} ${password} 2>&1`, { timeout: 10000 }, (error, stdout) => {
-                // Clean up the connection
-                exec(`net use \\\\${host}\\IPC$ /delete /y 2>&1`, { timeout: 5000 }, () => {});
-                if (!error && !stdout.includes('error')) {
-                    callback({ success: true, method: 'SMB', host, username });
+            // Windows: use net use for SMB authentication
+            exec(`net use \\\\${host}\\IPC$ /user:${username} "${password}" 2>&1`, { timeout: 15000 }, (error, stdout) => {
+                const success = !error && !stdout.toLowerCase().includes('error') && !stdout.toLowerCase().includes('denied');
+                if (success) {
+                    // Get shares list
+                    exec(`net view \\\\${host} 2>&1`, { timeout: 10000 }, (err2, shares) => {
+                        exec(`net use \\\\${host}\\IPC$ /delete /y 2>&1`, { timeout: 5000 }, () => {});
+                        callback({ success: true, method: 'SMB', host, username, shares: shares || '', info: 'SMB authentication successful' });
+                    });
                 } else {
-                    callback({ success: false, method: 'SMB', error: 'SMB authentication failed' });
+                    callback({ success: false, method: 'SMB', error: 'SMB authentication failed', info: stdout });
                 }
             });
         } else {
-            exec(`which smbclient`, { timeout: 2000 }, (err) => {
+            // Linux: try smbclient, then rpcclient
+            exec(`which smbclient 2>/dev/null`, { timeout: 2000 }, (err) => {
                 if (!err) {
-                    exec(`smbclient -L ${host} -U '${username}%${password}' -t 5 2>&1`, { timeout: 10000 }, (error, stdout) => {
-                        if (stdout && (stdout.includes('Sharename') || stdout.includes('Disk'))) {
-                            callback({ success: true, method: 'SMB', host, username });
-                        } else {
-                            callback({ success: false, method: 'SMB', error: 'SMB authentication failed' });
-                        }
+                    const escapedPass = password.replace(/'/g, "'\\''");
+                    exec(`smbclient -L //${host} -U '${username}%${escapedPass}' -t 5 2>&1`, { timeout: 15000 }, (error, stdout) => {
+                        const success = stdout && (stdout.includes('Sharename') || stdout.includes('Disk') || stdout.includes('IPC'));
+                        callback({
+                            success, method: 'SMB', host, username,
+                            shares: success ? stdout : '',
+                            info: success ? 'SMB shares enumerated' : 'SMB auth failed'
+                        });
                     });
                 } else {
-                    callback({ success: false, method: 'SMB', error: 'SMB service accessible but smbclient not available' });
+                    // Try rpcclient
+                    exec(`which rpcclient 2>/dev/null`, { timeout: 2000 }, (err2) => {
+                        if (!err2) {
+                            const escapedPass = password.replace(/'/g, "'\\''");
+                            exec(`rpcclient -U '${username}%${escapedPass}' ${host} -c 'srvinfo' 2>&1`, { timeout: 10000 }, (error, stdout) => {
+                                const success = stdout && !stdout.includes('NT_STATUS');
+                                callback({ success, method: 'SMB-RPC', host, username, info: success ? stdout.trim() : 'RPC auth failed' });
+                            });
+                        } else {
+                            callback({ success: false, method: 'SMB', error: 'SMB open but no smbclient/rpcclient available' });
+                        }
+                    });
                 }
             });
         }
     });
 
-    socket.on('timeout', () => {
-        socket.destroy();
-        callback({ success: false, method: 'SMB', error: 'Connection timeout' });
-    });
-
-    socket.on('error', (err) => {
-        callback({ success: false, method: 'SMB', error: err.message });
-    });
-
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: 'SMB', error: 'Connection timeout' }); });
+    socket.on('error', (err) => { callback({ success: false, method: 'SMB', error: err.message }); });
     socket.connect(445, host);
 }
 
-// Post-exploitation: collect info from exploited host
+// Enhanced post-exploitation data collection
 function collectPostExploitData(host, method, callback) {
     const isWin = process.platform === 'win32';
+    const results = { host, hostname: '', os: 'Unknown', info: '', services: [], users: '' };
 
-    // Determine OS by checking what ports responded
-    // Also try to get hostname via reverse DNS
-    exec(`${isWin ? 'nslookup' : 'host'} ${host} 2>&1`, { timeout: 5000 }, (error, stdout) => {
-        let hostname = '';
+    // Reverse DNS lookup
+    const dnsCmd = isWin ? `nslookup ${host}` : `host ${host}`;
+    exec(`${dnsCmd} 2>&1`, { timeout: 5000 }, (err, stdout) => {
         if (stdout) {
-            const match = stdout.match(/name\s*[=:]\s*(\S+)/i) || stdout.match(/pointer\s+(\S+)/i);
-            if (match) hostname = match[1].replace(/\.$/, '');
+            const match = stdout.match(/name\s*[=:]\s*(\S+)/i) || stdout.match(/pointer\s+(\S+)/i) || stdout.match(/Name:\s+(\S+)/i);
+            if (match) results.hostname = match[1].replace(/\.$/, '');
         }
 
-        callback({
-            host: host,
-            hostname: hostname,
-            os: method && method.includes('SSH') ? 'Linux/Unix' : method && method.includes('SMB') ? 'Windows' : 'Unknown',
-            info: `Hostname: ${hostname || 'unknown'}, Access via: ${method || 'unknown'}`
+        // OS detection
+        results.os = method && method.includes('SSH') ? 'Linux/Unix' : method && method.includes('SMB') ? 'Windows' : 'Unknown';
+
+        // Try ARP for MAC address
+        const arpCmd = isWin ? `arp -a ${host}` : `arp -n ${host}`;
+        exec(`${arpCmd} 2>&1`, { timeout: 3000 }, (arpErr, arpOut) => {
+            let mac = '';
+            if (arpOut) {
+                const macMatch = arpOut.match(/([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}/);
+                if (macMatch) mac = macMatch[0];
+            }
+
+            results.info = `Hostname: ${results.hostname || 'unknown'}, MAC: ${mac || 'unknown'}, Access: ${method || 'unknown'}`;
+            callback(results);
         });
     });
 }
