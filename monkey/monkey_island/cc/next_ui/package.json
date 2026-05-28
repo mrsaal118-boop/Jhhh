@@ -49,16 +49,16 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "electron/icon.png",
+      "icon": "electron/icon.ico",
       "artifactName": "InfectionMonkey-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "electron/icon.png",
-      "uninstallerIcon": "electron/icon.png",
-      "installerHeaderIcon": "electron/icon.png",
+      "installerIcon": "electron/icon.ico",
+      "uninstallerIcon": "electron/icon.ico",
+      "installerHeaderIcon": "electron/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Infection Monkey"
@@ -66,19 +66,27 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Security",
-      "icon": "electron/icon.png",
+      "icon": "electron/icon.ico",
       "artifactName": "InfectionMonkey-${version}.${ext}"
     },
     "extraResources": [
       {
-        "from": ".next",
-        "to": ".next"
+        "from": ".next/standalone",
+        "to": "standalone",
+        "filter": ["**/*"]
+      },
+      {
+        "from": ".next/static",
+        "to": "standalone/.next/static",
+        "filter": ["**/*"]
       },
       {
         "from": "public",
-        "to": "public"
+        "to": "standalone/public",
+        "filter": ["**/*"]
       }
-    ]
+    ],
+    "asar": false
   },
   "dependencies": {
     "@mui/icons-material": "^5.14.18",

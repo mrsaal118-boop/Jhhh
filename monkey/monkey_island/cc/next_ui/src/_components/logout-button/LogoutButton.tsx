@@ -2,14 +2,22 @@
 import * as React from 'react';
 import Button from '@mui/material/Button';
 import LogoutIcon from '@mui/icons-material/Logout';
-import { useLogoutMutation } from '@/redux/features/api/authentication/authenticationEndpoints';
+import { useRouter } from 'next/navigation';
+import { PATHS } from '@/constants/paths.constants';
 
 const LogoutButton = () => {
-    const [logout] = useLogoutMutation();
+    const router = useRouter();
+
+    const handleLogout = () => {
+        localStorage.removeItem('AuthenticationToken');
+        localStorage.removeItem('ExpirationTimestamp');
+        localStorage.removeItem('LastRefreshTimestamp');
+        router.push(PATHS.LOGIN);
+    };
 
     return (
         <Button
-            onClick={() => logout()}
+            onClick={handleLogout}
             variant="outlined"
             startIcon={<LogoutIcon />}
             fullWidth
