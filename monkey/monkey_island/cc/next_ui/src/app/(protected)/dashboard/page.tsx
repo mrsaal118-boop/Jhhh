@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Box from '@mui/material/Box';
 import Grid from '@mui/material/Unstable_Grid2';
 import Card from '@mui/material/Card';
@@ -13,6 +13,7 @@ import IconButton from '@mui/material/IconButton';
 import List from '@mui/material/List';
 import ListItem from '@mui/material/ListItem';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import StopIcon from '@mui/icons-material/Stop';
 import DevicesIcon from '@mui/icons-material/Devices';
 import BugReportIcon from '@mui/icons-material/BugReport';
 import ShieldIcon from '@mui/icons-material/Shield';
@@ -24,6 +25,16 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
 import { useRouter } from 'next/navigation';
 import { PATHS } from '@/constants/paths.constants';
+import {
+    getSimulation,
+    startSimulation,
+    stopSimulation,
+    progressSimulation,
+    getSecurityScore,
+    getEvents,
+    type SimulationState,
+    type MonkeyEvent
+} from '@/lib/appState';
 
 interface StatCardProps {
     title: string;
@@ -96,6 +107,48 @@ function StatCard({
 
 export default function DashboardPage() {
     const router = useRouter();
+    const [sim, setSim] = useState<SimulationState>(getSimulation());
+    const [events, setEvents] = useState<MonkeyEvent[]>([]);
+
+    const refreshState = useCallback(() => {
+        const currentSim = getSimulation();
+        if (currentSim.status === 'running') {
+            setSim(progressSimulation());
+        } else {
+            setSim(currentSim);
+        }
+        setEvents(getEvents().slice(0, 5));
+    }, []);
+
+    useEffect(() => {
+        refreshState();
+        const interval = setInterval(refreshState, 1000);
+        return () => clearInterval(interval);
+    }, [refreshState]);
+
+    const handleStartStop = () => {
+        if (sim.status === 'running') {
+            setSim(stopSimulation());
+        } else {
+            setSim(startSimulation());
+        }
+    };
+
+    const phaseValues = [
+        sim.phases.scanning,
+        sim.phases.exploitation,
+        sim.phases.postExploitation,
+        sim.phases.reporting
+    ];
+
+    const statusColor =
+        sim.status === 'running'
+            ? '#00E676'
+            : sim.status === 'completed'
+              ? '#40C4FF'
+              : sim.status === 'stopped'
+                ? '#FF5252'
+                : undefined;
 
     return (
         <Box>
@@ -117,16 +170,27 @@ export default function DashboardPage() {
                     </Typography>
                 </Box>
                 <Box sx={{ display: 'flex', gap: 1.5 }}>
-                    <IconButton size="small" sx={{ color: 'text.secondary' }}>
+                    <IconButton
+                        size="small"
+                        sx={{ color: 'text.secondary' }}
+                        onClick={refreshState}>
                         <RefreshIcon />
                     </IconButton>
                     <Button
                         variant="contained"
-                        color="primary"
-                        startIcon={<PlayArrowIcon />}
-                        onClick={() => router.push(PATHS.RUN)}
+                        color={sim.status === 'running' ? 'error' : 'primary'}
+                        startIcon={
+                            sim.status === 'running' ? (
+                                <StopIcon />
+                            ) : (
+                                <PlayArrowIcon />
+                            )
+                        }
+                        onClick={handleStartStop}
                         sx={{ color: '#000', fontWeight: 700 }}>
-                        Start Simulation
+                        {sim.status === 'running'
+                            ? 'Stop Simulation'
+                            : 'Start Simulation'}
                     </Button>
                 </Box>
             </Box>
@@ -135,25 +199,35 @@ export default function DashboardPage() {
                 <Grid xs={12} sm={6} lg={3}>
                     <StatCard
                         title="Machines Discovered"
-                        value={0}
+                        value={sim.machinesDiscovered}
                         subtitle="In current scan"
                         icon={<DevicesIcon />}
                         color="#40C4FF"
+                        trend={
+                            sim.machinesDiscovered > 0
+                                ? `+${sim.machinesDiscovered}`
+                                : undefined
+                        }
                     />
                 </Grid>
                 <Grid xs={12} sm={6} lg={3}>
                     <StatCard
                         title="Vulnerabilities Found"
-                        value={0}
+                        value={sim.vulnerabilitiesFound}
                         subtitle="Across all machines"
                         icon={<BugReportIcon />}
                         color="#FF5252"
+                        trend={
+                            sim.vulnerabilitiesFound > 0
+                                ? `+${sim.vulnerabilitiesFound}`
+                                : undefined
+                        }
                     />
                 </Grid>
                 <Grid xs={12} sm={6} lg={3}>
                     <StatCard
                         title="Exploits Successful"
-                        value={0}
+                        value={sim.exploitsSuccessful}
                         subtitle="Propagation attempts"
                         icon={<SecurityIcon />}
                         color="#FFB74D"
@@ -162,8 +236,12 @@ export default function DashboardPage() {
                 <Grid xs={12} sm={6} lg={3}>
                     <StatCard
                         title="Security Score"
-                        value="--"
-                        subtitle="Run a simulation first"
+                        value={getSecurityScore(sim)}
+                        subtitle={
+                            sim.status === 'idle'
+                                ? 'Run a simulation first'
+                                : 'Based on exploit ratio'
+                        }
                         icon={<ShieldIcon />}
                         color="#00E676"
                     />
@@ -185,79 +263,153 @@ export default function DashboardPage() {
                                     Simulation Status
                                 </Typography>
                                 <Chip
-                                    label="Idle"
+                                    label={
+                                        sim.status.charAt(0).toUpperCase() +
+                                        sim.status.slice(1)
+                                    }
                                     size="small"
                                     sx={{
-                                        backgroundColor:
-                                            'rgba(158, 158, 158, 0.12)',
-                                        color: 'text.secondary',
+                                        backgroundColor: statusColor
+                                            ? `${statusColor}20`
+                                            : 'rgba(158, 158, 158, 0.12)',
+                                        color: statusColor || 'text.secondary',
                                         fontWeight: 600
                                     }}
                                 />
                             </Box>
 
-                            <Box
-                                sx={{
-                                    p: 4,
-                                    borderRadius: 3,
-                                    backgroundColor:
-                                        'rgba(255, 255, 255, 0.02)',
-                                    border: '1px dashed rgba(255, 255, 255, 0.1)',
-                                    textAlign: 'center'
-                                }}>
-                                <NetworkCheckIcon
-                                    sx={{
-                                        fontSize: 56,
-                                        color: 'text.secondary',
-                                        mb: 2,
-                                        opacity: 0.5
-                                    }}
-                                />
-                                <Typography
-                                    variant="h6"
-                                    sx={{ mb: 1, color: 'text.secondary' }}>
-                                    No Active Simulation
-                                </Typography>
-                                <Typography
-                                    variant="body2"
-                                    sx={{
-                                        color: 'text.secondary',
-                                        mb: 3,
-                                        maxWidth: 400,
-                                        mx: 'auto'
-                                    }}>
-                                    Configure your agent settings and start a
-                                    simulation to test your network security
-                                    posture.
-                                </Typography>
+                            {sim.status === 'idle' ? (
                                 <Box
                                     sx={{
-                                        display: 'flex',
-                                        gap: 1.5,
-                                        justifyContent: 'center'
+                                        p: 4,
+                                        borderRadius: 3,
+                                        backgroundColor:
+                                            'rgba(255, 255, 255, 0.02)',
+                                        border: '1px dashed rgba(255, 255, 255, 0.1)',
+                                        textAlign: 'center'
                                     }}>
-                                    <Button
-                                        variant="outlined"
-                                        color="primary"
-                                        onClick={() =>
-                                            router.push(PATHS.CONFIGURE)
-                                        }
+                                    <NetworkCheckIcon
                                         sx={{
-                                            borderColor:
-                                                'rgba(0, 230, 118, 0.5)'
+                                            fontSize: 56,
+                                            color: 'text.secondary',
+                                            mb: 2,
+                                            opacity: 0.5
+                                        }}
+                                    />
+                                    <Typography
+                                        variant="h6"
+                                        sx={{
+                                            mb: 1,
+                                            color: 'text.secondary'
                                         }}>
-                                        Configure Agent
-                                    </Button>
-                                    <Button
-                                        variant="contained"
-                                        color="primary"
-                                        startIcon={<PlayArrowIcon />}
-                                        onClick={() => router.push(PATHS.RUN)}
-                                        sx={{ color: '#000' }}>
-                                        Run Simulation
-                                    </Button>
+                                        No Active Simulation
+                                    </Typography>
+                                    <Typography
+                                        variant="body2"
+                                        sx={{
+                                            color: 'text.secondary',
+                                            mb: 3,
+                                            maxWidth: 400,
+                                            mx: 'auto'
+                                        }}>
+                                        Configure your agent settings and start
+                                        a simulation to test your network
+                                        security posture.
+                                    </Typography>
+                                    <Box
+                                        sx={{
+                                            display: 'flex',
+                                            gap: 1.5,
+                                            justifyContent: 'center'
+                                        }}>
+                                        <Button
+                                            variant="outlined"
+                                            color="primary"
+                                            onClick={() =>
+                                                router.push(PATHS.CONFIGURE)
+                                            }
+                                            sx={{
+                                                borderColor:
+                                                    'rgba(0, 230, 118, 0.5)'
+                                            }}>
+                                            Configure Agent
+                                        </Button>
+                                        <Button
+                                            variant="contained"
+                                            color="primary"
+                                            startIcon={<PlayArrowIcon />}
+                                            onClick={handleStartStop}
+                                            sx={{ color: '#000' }}>
+                                            Run Simulation
+                                        </Button>
+                                    </Box>
                                 </Box>
-                            </Box>
+                            ) : (
+                                <Box>
+                                    <Grid container spacing={2} sx={{ mb: 2 }}>
+                                        <Grid xs={6} sm={3}>
+                                            <Typography
+                                                variant="caption"
+                                                sx={{
+                                                    color: 'text.secondary'
+                                                }}>
+                                                Active Agents
+                                            </Typography>
+                                            <Typography
+                                                variant="h6"
+                                                sx={{ fontWeight: 700 }}>
+                                                {sim.activeAgents}
+                                            </Typography>
+                                        </Grid>
+                                        <Grid xs={6} sm={3}>
+                                            <Typography
+                                                variant="caption"
+                                                sx={{
+                                                    color: 'text.secondary'
+                                                }}>
+                                                Scanned
+                                            </Typography>
+                                            <Typography
+                                                variant="h6"
+                                                sx={{ fontWeight: 700 }}>
+                                                {sim.machinesScanned}
+                                            </Typography>
+                                        </Grid>
+                                        <Grid xs={6} sm={3}>
+                                            <Typography
+                                                variant="caption"
+                                                sx={{
+                                                    color: 'text.secondary'
+                                                }}>
+                                                Exploited
+                                            </Typography>
+                                            <Typography
+                                                variant="h6"
+                                                sx={{ fontWeight: 700 }}>
+                                                {sim.machinesExploited}
+                                            </Typography>
+                                        </Grid>
+                                        <Grid xs={6} sm={3}>
+                                            <Typography
+                                                variant="caption"
+                                                sx={{
+                                                    color: 'text.secondary'
+                                                }}>
+                                                Started
+                                            </Typography>
+                                            <Typography
+                                                variant="body2"
+                                                sx={{ fontWeight: 500 }}>
+                                                {sim.startedAt
+                                                    ? new Date(
+                                                          sim.startedAt
+                                                      ).toLocaleTimeString()
+                                                    : '--'}
+                                            </Typography>
+                                        </Grid>
+                                    </Grid>
+                                </Box>
+                            )}
 
                             <Box sx={{ mt: 3 }}>
                                 <Typography
@@ -297,7 +449,7 @@ export default function DashboardPage() {
                                                 </Typography>
                                                 <LinearProgress
                                                     variant="determinate"
-                                                    value={0}
+                                                    value={phaseValues[i]}
                                                     sx={{
                                                         mt: 1,
                                                         height: 3,
@@ -306,6 +458,15 @@ export default function DashboardPage() {
                                                             'rgba(255, 255, 255, 0.05)'
                                                     }}
                                                 />
+                                                <Typography
+                                                    variant="caption"
+                                                    sx={{
+                                                        color: 'text.secondary',
+                                                        fontSize: '0.65rem'
+                                                    }}>
+                                                    {Math.round(phaseValues[i])}
+                                                    %
+                                                </Typography>
                                             </Box>
                                         </Grid>
                                     ))}
@@ -318,17 +479,9 @@ export default function DashboardPage() {
                 <Grid xs={12} lg={4}>
                     <Card sx={{ mb: 2.5 }}>
                         <CardContent sx={{ p: 2.5 }}>
-                            <Box
-                                sx={{
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    alignItems: 'center',
-                                    mb: 2
-                                }}>
-                                <Typography variant="h6">
-                                    Quick Actions
-                                </Typography>
-                            </Box>
+                            <Typography variant="h6" sx={{ mb: 2 }}>
+                                Quick Actions
+                            </Typography>
                             <List disablePadding>
                                 {[
                                     {
@@ -440,42 +593,76 @@ export default function DashboardPage() {
                             <Typography variant="h6" sx={{ mb: 2 }}>
                                 Recent Activity
                             </Typography>
-                            <Box
-                                sx={{
-                                    textAlign: 'center',
-                                    py: 3,
-                                    color: 'text.secondary'
-                                }}>
-                                <EventNoteIcon
-                                    sx={{ fontSize: 40, mb: 1, opacity: 0.3 }}
-                                />
-                                <Typography variant="body2">
-                                    No recent activity
-                                </Typography>
-                                <Typography variant="caption">
-                                    Events will appear here after running a
-                                    simulation
-                                </Typography>
-                            </Box>
+                            {events.length === 0 ? (
+                                <Box
+                                    sx={{
+                                        textAlign: 'center',
+                                        py: 3,
+                                        color: 'text.secondary'
+                                    }}>
+                                    <StorageIcon
+                                        sx={{
+                                            fontSize: 40,
+                                            mb: 1,
+                                            opacity: 0.3
+                                        }}
+                                    />
+                                    <Typography variant="body2">
+                                        No recent activity
+                                    </Typography>
+                                    <Typography variant="caption">
+                                        Events will appear here after running a
+                                        simulation
+                                    </Typography>
+                                </Box>
+                            ) : (
+                                <List disablePadding>
+                                    {events.map((evt) => (
+                                        <ListItem
+                                            key={evt.id}
+                                            disablePadding
+                                            sx={{ mb: 0.5 }}>
+                                            <Box
+                                                sx={{
+                                                    width: '100%',
+                                                    p: 1,
+                                                    borderRadius: 1,
+                                                    backgroundColor:
+                                                        'rgba(255,255,255,0.02)'
+                                                }}>
+                                                <Typography
+                                                    variant="caption"
+                                                    sx={{
+                                                        color:
+                                                            evt.severity ===
+                                                            'error'
+                                                                ? '#FF5252'
+                                                                : evt.severity ===
+                                                                    'success'
+                                                                  ? '#00E676'
+                                                                  : evt.severity ===
+                                                                      'warning'
+                                                                    ? '#FFB74D'
+                                                                    : 'text.secondary'
+                                                    }}>
+                                                    {new Date(
+                                                        evt.timestamp
+                                                    ).toLocaleTimeString()}
+                                                </Typography>
+                                                <Typography
+                                                    variant="body2"
+                                                    sx={{ fontSize: '0.8rem' }}>
+                                                    {evt.message}
+                                                </Typography>
+                                            </Box>
+                                        </ListItem>
+                                    ))}
+                                </List>
+                            )}
                         </CardContent>
                     </Card>
                 </Grid>
             </Grid>
-        </Box>
-    );
-}
-
-function EventNoteIcon(props: any) {
-    return (
-        <Box component="span" {...props}>
-            <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="1em"
-                height="1em"
-                viewBox="0 0 24 24"
-                fill="currentColor">
-                <path d="M17 10H7v2h10v-2zm2-7h-1V1h-2v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zm-5-5H7v2h7v-2z" />
-            </svg>
         </Box>
     );
 }

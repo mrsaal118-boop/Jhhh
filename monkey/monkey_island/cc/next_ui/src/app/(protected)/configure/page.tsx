@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Box from '@mui/material/Box';
 import Grid from '@mui/material/Unstable_Grid2';
 import Card from '@mui/material/Card';
@@ -17,6 +17,7 @@ import AccordionDetails from '@mui/material/AccordionDetails';
 import Chip from '@mui/material/Chip';
 import Divider from '@mui/material/Divider';
 import Alert from '@mui/material/Alert';
+import Snackbar from '@mui/material/Snackbar';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import SaveIcon from '@mui/icons-material/Save';
 import RestoreIcon from '@mui/icons-material/Restore';
@@ -24,6 +25,7 @@ import SecurityIcon from '@mui/icons-material/Security';
 import NetworkCheckIcon from '@mui/icons-material/NetworkCheck';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
 import DevicesIcon from '@mui/icons-material/Devices';
+import { getConfig, saveConfig, resetConfig } from '@/lib/appState';
 
 export default function ConfigurePage() {
     const [propagationDepth, setPropagationDepth] = useState<number>(2);
@@ -32,6 +34,47 @@ export default function ConfigurePage() {
     const [enablePolymorphism, setEnablePolymorphism] = useState(false);
     const [targetSubnets, setTargetSubnets] = useState('');
     const [blockedIPs, setBlockedIPs] = useState('');
+    const [snackbar, setSnackbar] = useState({ open: false, message: '' });
+
+    useEffect(() => {
+        const config = getConfig();
+        setPropagationDepth(config.propagationDepth);
+        setTunnelTimeout(config.tunnelTimeout);
+        setScanNetwork(config.scanNetwork);
+        setEnablePolymorphism(config.enablePolymorphism);
+        setTargetSubnets(config.targetSubnets);
+        setBlockedIPs(config.blockedIPs);
+    }, []);
+
+    const handleSave = () => {
+        saveConfig({
+            propagationDepth,
+            tunnelTimeout,
+            scanNetwork,
+            enablePolymorphism,
+            targetSubnets,
+            blockedIPs,
+            credentials: []
+        });
+        setSnackbar({
+            open: true,
+            message: 'Configuration saved successfully!'
+        });
+    };
+
+    const handleReset = () => {
+        const defaults = resetConfig();
+        setPropagationDepth(defaults.propagationDepth);
+        setTunnelTimeout(defaults.tunnelTimeout);
+        setScanNetwork(defaults.scanNetwork);
+        setEnablePolymorphism(defaults.enablePolymorphism);
+        setTargetSubnets(defaults.targetSubnets);
+        setBlockedIPs(defaults.blockedIPs);
+        setSnackbar({
+            open: true,
+            message: 'Configuration reset to defaults.'
+        });
+    };
 
     return (
         <Box>
@@ -57,6 +100,7 @@ export default function ConfigurePage() {
                     <Button
                         variant="outlined"
                         startIcon={<RestoreIcon />}
+                        onClick={handleReset}
                         sx={{
                             borderColor: 'rgba(255, 255, 255, 0.2)',
                             color: 'text.secondary'
@@ -67,6 +111,7 @@ export default function ConfigurePage() {
                         variant="contained"
                         color="primary"
                         startIcon={<SaveIcon />}
+                        onClick={handleSave}
                         sx={{ color: '#000', fontWeight: 700 }}>
                         Save Configuration
                     </Button>
@@ -493,6 +538,14 @@ export default function ConfigurePage() {
                     </Card>
                 </Grid>
             </Grid>
+
+            <Snackbar
+                open={snackbar.open}
+                autoHideDuration={3000}
+                onClose={() => setSnackbar({ ...snackbar, open: false })}
+                message={snackbar.message}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+            />
         </Box>
     );
 }

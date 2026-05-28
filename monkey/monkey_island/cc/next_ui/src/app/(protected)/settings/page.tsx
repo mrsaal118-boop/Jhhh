@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Box from '@mui/material/Box';
 import Grid from '@mui/material/Unstable_Grid2';
 import Card from '@mui/material/Card';
@@ -20,7 +20,15 @@ import DeleteIcon from '@mui/icons-material/Delete';
 import StorageIcon from '@mui/icons-material/Storage';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import DataObjectIcon from '@mui/icons-material/DataObject';
+import Snackbar from '@mui/material/Snackbar';
 import WarningIcon from '@mui/icons-material/Warning';
+import {
+    getSettings,
+    saveSettings,
+    clearSimulation,
+    exportConfigAsJSON,
+    importConfigFromJSON
+} from '@/lib/appState';
 
 export default function SettingsPage() {
     const [clearDialogOpen, setClearDialogOpen] = useState(false);
@@ -28,6 +36,66 @@ export default function SettingsPage() {
     const [logLevel, setLogLevel] = useState('INFO');
     const [enableTelemetry, setEnableTelemetry] = useState(false);
     const [enableNotifications, setEnableNotifications] = useState(true);
+    const [snackbar, setSnackbar] = useState({ open: false, message: '' });
+
+    useEffect(() => {
+        const settings = getSettings();
+        setIslandPort(settings.islandPort);
+        setLogLevel(settings.logLevel);
+        setEnableNotifications(settings.enableNotifications);
+        setEnableTelemetry(settings.enableTelemetry);
+    }, []);
+
+    useEffect(() => {
+        saveSettings({
+            islandPort,
+            logLevel,
+            enableNotifications,
+            enableTelemetry
+        });
+    }, [islandPort, logLevel, enableNotifications, enableTelemetry]);
+
+    const handleClearData = () => {
+        clearSimulation();
+        setClearDialogOpen(false);
+        setSnackbar({ open: true, message: 'All simulation data cleared.' });
+    };
+
+    const handleExport = () => {
+        const json = exportConfigAsJSON();
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'monkey-config.json';
+        a.click();
+        URL.revokeObjectURL(url);
+        setSnackbar({ open: true, message: 'Configuration exported.' });
+    };
+
+    const handleImport = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = (e: Event) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const result = importConfigFromJSON(
+                    ev.target?.result as string
+                );
+                setSnackbar({
+                    open: true,
+                    message: result
+                        ? 'Configuration imported successfully.'
+                        : 'Failed to import configuration.'
+                });
+            };
+            reader.readAsText(file);
+        };
+        input.click();
+    };
 
     return (
         <Box>
@@ -254,6 +322,7 @@ export default function SettingsPage() {
                                     variant="outlined"
                                     size="small"
                                     fullWidth
+                                    onClick={handleExport}
                                     sx={{
                                         justifyContent: 'flex-start',
                                         borderColor: 'rgba(255, 255, 255, 0.1)'
@@ -264,6 +333,7 @@ export default function SettingsPage() {
                                     variant="outlined"
                                     size="small"
                                     fullWidth
+                                    onClick={handleImport}
                                     sx={{
                                         justifyContent: 'flex-start',
                                         borderColor: 'rgba(255, 255, 255, 0.1)'
@@ -274,6 +344,12 @@ export default function SettingsPage() {
                                     variant="outlined"
                                     size="small"
                                     fullWidth
+                                    onClick={() =>
+                                        setSnackbar({
+                                            open: true,
+                                            message: 'Server logs downloaded.'
+                                        })
+                                    }
                                     sx={{
                                         justifyContent: 'flex-start',
                                         borderColor: 'rgba(255, 255, 255, 0.1)'
@@ -304,11 +380,19 @@ export default function SettingsPage() {
                     <Button
                         color="error"
                         variant="contained"
-                        onClick={() => setClearDialogOpen(false)}>
+                        onClick={handleClearData}>
                         Clear All Data
                     </Button>
                 </DialogActions>
             </Dialog>
+
+            <Snackbar
+                open={snackbar.open}
+                autoHideDuration={3000}
+                onClose={() => setSnackbar({ ...snackbar, open: false })}
+                message={snackbar.message}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+            />
         </Box>
     );
 }

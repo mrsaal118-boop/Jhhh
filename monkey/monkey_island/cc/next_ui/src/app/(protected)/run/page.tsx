@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Box from '@mui/material/Box';
 import Grid from '@mui/material/Unstable_Grid2';
 import Card from '@mui/material/Card';
@@ -18,10 +18,42 @@ import ComputerIcon from '@mui/icons-material/Computer';
 import TerminalIcon from '@mui/icons-material/Terminal';
 import LanguageIcon from '@mui/icons-material/Language';
 import LanIcon from '@mui/icons-material/Lan';
+import {
+    getSimulation,
+    startSimulation,
+    stopSimulation,
+    progressSimulation,
+    getConfig
+} from '@/lib/appState';
 
 export default function RunPage() {
     const [tabValue, setTabValue] = useState(0);
-    const [isRunning, setIsRunning] = useState(false);
+    const [sim, setSim] = useState(getSimulation());
+    const isRunning = sim.status === 'running';
+    const config = getConfig();
+
+    const refreshState = useCallback(() => {
+        const currentSim = getSimulation();
+        if (currentSim.status === 'running') {
+            setSim(progressSimulation());
+        } else {
+            setSim(currentSim);
+        }
+    }, []);
+
+    useEffect(() => {
+        refreshState();
+        const interval = setInterval(refreshState, 1000);
+        return () => clearInterval(interval);
+    }, [refreshState]);
+
+    const handleStartStop = () => {
+        if (isRunning) {
+            setSim(stopSimulation());
+        } else {
+            setSim(startSimulation());
+        }
+    };
 
     return (
         <Box>
@@ -48,7 +80,7 @@ export default function RunPage() {
                     color={isRunning ? 'error' : 'primary'}
                     size="large"
                     startIcon={isRunning ? <StopIcon /> : <PlayArrowIcon />}
-                    onClick={() => setIsRunning(!isRunning)}
+                    onClick={handleStartStop}
                     sx={{
                         color: isRunning ? '#fff' : '#000',
                         fontWeight: 700,
@@ -331,11 +363,16 @@ export default function RunPage() {
                                     </Typography>
                                     <Chip
                                         label={
-                                            isRunning ? 'Running' : 'Stopped'
+                                            sim.status.charAt(0).toUpperCase() +
+                                            sim.status.slice(1)
                                         }
                                         size="small"
                                         color={
-                                            isRunning ? 'success' : 'default'
+                                            isRunning
+                                                ? 'success'
+                                                : sim.status === 'completed'
+                                                  ? 'info'
+                                                  : 'default'
                                         }
                                     />
                                 </Box>
@@ -353,7 +390,7 @@ export default function RunPage() {
                                     <Typography
                                         variant="body2"
                                         sx={{ fontWeight: 600 }}>
-                                        0
+                                        {sim.activeAgents}
                                     </Typography>
                                 </Box>
                                 <Divider />
@@ -370,7 +407,7 @@ export default function RunPage() {
                                     <Typography
                                         variant="body2"
                                         sx={{ fontWeight: 600 }}>
-                                        0
+                                        {sim.machinesScanned}
                                     </Typography>
                                 </Box>
                                 <Divider />
@@ -387,7 +424,7 @@ export default function RunPage() {
                                     <Typography
                                         variant="body2"
                                         sx={{ fontWeight: 600 }}>
-                                        0
+                                        {sim.machinesExploited}
                                     </Typography>
                                 </Box>
                             </Box>
@@ -404,9 +441,12 @@ export default function RunPage() {
                                 { label: 'Plugins Installed', done: false },
                                 {
                                     label: 'Credentials Configured',
-                                    done: false
+                                    done: config.credentials.length > 0
                                 },
-                                { label: 'Network Targets Set', done: false }
+                                {
+                                    label: 'Network Targets Set',
+                                    done: config.targetSubnets.length > 0
+                                }
                             ].map((item) => (
                                 <Box
                                     key={item.label}

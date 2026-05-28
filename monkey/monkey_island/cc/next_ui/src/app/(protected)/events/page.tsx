@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Box from '@mui/material/Box';
 import Card from '@mui/material/Card';
 import CardContent from '@mui/material/CardContent';
@@ -25,11 +25,37 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import DownloadIcon from '@mui/icons-material/Download';
 import { useRouter } from 'next/navigation';
 import { PATHS } from '@/constants/paths.constants';
+import { getEvents, type MonkeyEvent } from '@/lib/appState';
 
 export default function EventsPage() {
     const router = useRouter();
     const [searchQuery, setSearchQuery] = useState('');
-    const events: any[] = [];
+    const [activeFilter, setActiveFilter] = useState('All');
+    const [allEvents, setAllEvents] = useState<MonkeyEvent[]>([]);
+
+    const refreshEvents = useCallback(() => {
+        setAllEvents(getEvents());
+    }, []);
+
+    useEffect(() => {
+        refreshEvents();
+        const interval = setInterval(refreshEvents, 2000);
+        return () => clearInterval(interval);
+    }, [refreshEvents]);
+
+    const filteredEvents = allEvents.filter((evt) => {
+        const matchesSearch =
+            searchQuery === '' ||
+            evt.message.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            evt.source.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            evt.target.toLowerCase().includes(searchQuery.toLowerCase());
+        const matchesFilter =
+            activeFilter === 'All' ||
+            evt.type.toLowerCase() === activeFilter.toLowerCase();
+        return matchesSearch && matchesFilter;
+    });
+
+    const events = filteredEvents;
 
     return (
         <Box>
@@ -55,14 +81,27 @@ export default function EventsPage() {
                     <Tooltip title="Export events">
                         <IconButton
                             size="small"
-                            sx={{ color: 'text.secondary' }}>
+                            sx={{ color: 'text.secondary' }}
+                            onClick={() => {
+                                const blob = new Blob(
+                                    [JSON.stringify(allEvents, null, 2)],
+                                    { type: 'application/json' }
+                                );
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = 'monkey-events.json';
+                                a.click();
+                                URL.revokeObjectURL(url);
+                            }}>
                             <DownloadIcon />
                         </IconButton>
                     </Tooltip>
                     <Tooltip title="Refresh">
                         <IconButton
                             size="small"
-                            sx={{ color: 'text.secondary' }}>
+                            sx={{ color: 'text.secondary' }}
+                            onClick={refreshEvents}>
                             <RefreshIcon />
                         </IconButton>
                     </Tooltip>
@@ -118,10 +157,13 @@ export default function EventsPage() {
                             key={filter}
                             label={filter}
                             size="small"
-                            variant={filter === 'All' ? 'filled' : 'outlined'}
+                            variant={
+                                filter === activeFilter ? 'filled' : 'outlined'
+                            }
+                            onClick={() => setActiveFilter(filter)}
                             sx={{
                                 cursor: 'pointer',
-                                ...(filter === 'All' && {
+                                ...(filter === activeFilter && {
                                     backgroundColor: 'rgba(0, 230, 118, 0.12)',
                                     color: 'primary.main'
                                 })
@@ -187,12 +229,25 @@ export default function EventsPage() {
                                     </TableRow>
                                 </TableHead>
                                 <TableBody>
-                                    {events.map((event, i) => (
-                                        <TableRow key={i}>
-                                            <TableCell>
-                                                {event.timestamp}
+                                    {events.map((event) => (
+                                        <TableRow key={event.id}>
+                                            <TableCell
+                                                sx={{ whiteSpace: 'nowrap' }}>
+                                                {new Date(
+                                                    event.timestamp
+                                                ).toLocaleString()}
                                             </TableCell>
-                                            <TableCell>{event.type}</TableCell>
+                                            <TableCell>
+                                                <Chip
+                                                    label={event.type}
+                                                    size="small"
+                                                    variant="outlined"
+                                                    sx={{
+                                                        textTransform:
+                                                            'capitalize'
+                                                    }}
+                                                />
+                                            </TableCell>
                                             <TableCell>
                                                 {event.source}
                                             </TableCell>
@@ -200,9 +255,40 @@ export default function EventsPage() {
                                                 {event.target}
                                             </TableCell>
                                             <TableCell>
-                                                {event.details}
+                                                {event.message}
                                             </TableCell>
-                                            <TableCell>{event.tags}</TableCell>
+                                            <TableCell>
+                                                <Chip
+                                                    label={event.severity}
+                                                    size="small"
+                                                    sx={{
+                                                        textTransform:
+                                                            'capitalize',
+                                                        backgroundColor:
+                                                            event.severity ===
+                                                            'error'
+                                                                ? 'rgba(255,82,82,0.15)'
+                                                                : event.severity ===
+                                                                    'success'
+                                                                  ? 'rgba(0,230,118,0.15)'
+                                                                  : event.severity ===
+                                                                      'warning'
+                                                                    ? 'rgba(255,183,77,0.15)'
+                                                                    : 'rgba(158,158,158,0.15)',
+                                                        color:
+                                                            event.severity ===
+                                                            'error'
+                                                                ? '#FF5252'
+                                                                : event.severity ===
+                                                                    'success'
+                                                                  ? '#00E676'
+                                                                  : event.severity ===
+                                                                      'warning'
+                                                                    ? '#FFB74D'
+                                                                    : 'text.secondary'
+                                                    }}
+                                                />
+                                            </TableCell>
                                         </TableRow>
                                     ))}
                                 </TableBody>

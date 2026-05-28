@@ -1,18 +1,84 @@
 {
-  "name": "infection_monkey_ui",
-  "version": "0.1.0",
+  "name": "infection-monkey",
+  "version": "2.3.0",
+  "description": "Infection Monkey - Open-Source Adversary Emulation Platform",
+  "author": "Infection Monkey Team",
+  "license": "GPL-3.0",
   "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "dev": "node server-dev.js",
+    "dev:electron": "concurrently \"npx next dev -p 3000\" \"wait-on http://localhost:3000 && cross-env NODE_ENV=development electron .\"",
     "prod": "cross-env SSL_CERT_PATH=../server.crt SSL_KEY_PATH=../server.key NEXT_PUBLIC_JAVASCRIPT_RUNTIME_PORT=8443 node server-prod.js",
     "build": "node build-standalone.js",
+    "build:next": "npx next build",
+    "build:electron": "npm run build:next && electron-builder --win --publish never",
+    "build:electron:linux": "npm run build:next && electron-builder --linux --publish never",
+    "build:electron:all": "npm run build:next && electron-builder --win --linux --publish never",
     "lint": "next lint",
     "test": "jest",
     "prod:e2e": "npm run build && npm run prod",
     "e2e": "cross-env START_SERVER_AND_TEST_INSECURE=1 start-server-and-test prod:e2e https://localhost:8443 cypress:run_e2e",
     "component": "cypress run --component",
     "cypress:open": "cross-env DEBUG=cypress:webpack cypress open",
-    "cypress:run_e2e": "cypress run --e2e"
+    "cypress:run_e2e": "cypress run --e2e",
+    "postinstall": "electron-builder install-app-deps || true"
+  },
+  "build": {
+    "appId": "com.infectionmonkey.app",
+    "productName": "Infection Monkey",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**/*",
+      ".next/**/*",
+      "node_modules/**/*",
+      "public/**/*",
+      "package.json",
+      "next.config.js"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "electron/icon.png",
+      "artifactName": "InfectionMonkey-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "electron/icon.png",
+      "uninstallerIcon": "electron/icon.png",
+      "installerHeaderIcon": "electron/icon.png",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Infection Monkey"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Security",
+      "icon": "electron/icon.png",
+      "artifactName": "InfectionMonkey-${version}.${ext}"
+    },
+    "extraResources": [
+      {
+        "from": ".next",
+        "to": ".next"
+      },
+      {
+        "from": "public",
+        "to": "public"
+      }
+    ]
   },
   "dependencies": {
     "@mui/icons-material": "^5.14.18",
@@ -46,8 +112,11 @@
     "@types/jest": "^29.5.11",
     "@typescript-eslint/eslint-plugin": "^6.11.0",
     "@typescript-eslint/parser": "^6.11.0",
+    "concurrently": "^9.2.1",
     "cross-env": "^7.0.3",
     "cypress": "^13.6.3",
+    "electron": "^42.3.0",
+    "electron-builder": "^26.8.1",
     "eslint": "^8.53.0",
     "eslint-config-prettier": "^9.0.0",
     "eslint-plugin-prettier": "^5.0.1",
@@ -59,6 +128,7 @@
     "prettier": "^3.1.0",
     "redux-logger": "^3.0.6",
     "start-server-and-test": "^2.0.3",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "wait-on": "^9.0.10"
   }
 }
