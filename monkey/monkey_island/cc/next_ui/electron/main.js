@@ -11,6 +11,28 @@ let mainWindow;
 let httpServer;
 const isDev = process.env.NODE_ENV === 'development';
 
+// Handle NSIS installer events (install/uninstall/update) - quit immediately
+if (process.platform === 'win32') {
+    const cmd = process.argv[1];
+    if (cmd === '--squirrel-install' || cmd === '--squirrel-updated' ||
+        cmd === '--squirrel-uninstall' || cmd === '--squirrel-obsolete') {
+        app.quit();
+    }
+}
+
+// Enforce single instance - prevent app from opening multiple times
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+    app.quit();
+} else {
+    app.on('second-instance', () => {
+        if (mainWindow) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+        }
+    });
+}
+
 // Find an available port starting from the given one
 function findAvailablePort(startPort) {
     return new Promise((resolve) => {
