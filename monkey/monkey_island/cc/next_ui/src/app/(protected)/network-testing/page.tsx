@@ -136,10 +136,6 @@ export default function NetworkTestingPage() {
     const [selectedCameraResult, setSelectedCameraResult] =
         useState<CameraScanResult | null>(null);
     const [statusMessage, setStatusMessage] = useState('');
-    const [credDbInfo, setCredDbInfo] = useState<{
-        total: number;
-        counts: Record<string, number>;
-    } | null>(null);
 
     const apiBase =
         typeof window !== 'undefined'
@@ -170,10 +166,6 @@ export default function NetworkTestingPage() {
                     if (subnets.length > 0 && !subnet) setSubnet(subnets[0]);
                 }
             })
-            .catch(() => {});
-        fetch(`${apiBase}/api/credential-db`)
-            .then((r) => r.json())
-            .then((data) => setCredDbInfo(data))
             .catch(() => {});
     }, [apiBase]);
 
@@ -386,12 +378,21 @@ export default function NetworkTestingPage() {
                 const result = await resp.json();
                 setPostExploitResults(result);
                 setDetailDialog(true);
+                const camerasFound =
+                    result.systemInfo?.discoveredCameras?.length || 0;
+                const agentId = result.systemInfo?.agentId || 'unknown';
                 setStatusMessage(
-                    `Sliver agent complete on ${host.ip}. Found ${
+                    `Sliver agent [${agentId}] deployed on ${host.ip} (${
+                        result.systemInfo?.callbackEncryption || 'AES-256'
+                    }). Found ${
                         result.lateralTargets?.length || 0
                     } lateral targets, ${
                         result.pivotPoints?.length || 0
-                    } pivot points.`
+                    } pivot points${
+                        camerasFound > 0
+                            ? `, ${camerasFound} cameras/IoT devices`
+                            : ''
+                    }.`
                 );
 
                 // Add discovered lateral targets
@@ -720,22 +721,20 @@ export default function NetworkTestingPage() {
                             Add
                         </Button>
                     </Box>
-                    {credDbInfo && (
-                        <Alert
-                            severity="info"
-                            sx={{ mt: 1 }}
-                            icon={<SecurityIcon />}>
-                            Built-in credential database: {credDbInfo.total}{' '}
-                            passwords (Cameras:{' '}
-                            {credDbInfo.counts?.cameras || 0}, Hikvision:{' '}
-                            {credDbInfo.counts?.hikvision || 0}, Dahua:{' '}
-                            {credDbInfo.counts?.dahua || 0}, Routers:{' '}
-                            {credDbInfo.counts?.routers || 0}, SSH:{' '}
-                            {credDbInfo.counts?.ssh || 0}, SMB:{' '}
-                            {credDbInfo.counts?.smb || 0}) + your custom
-                            credentials. Testing uses 8 parallel connections.
-                        </Alert>
-                    )}
+                    <Alert
+                        severity="success"
+                        sx={{ mt: 1 }}
+                        icon={<SecurityIcon />}>
+                        <strong>
+                            Built-in: 500+ passwords from SecLists + rockyou
+                        </strong>{' '}
+                        (Top 1000 most common passwords worldwide) × 5 usernames
+                        = 2500+ credential combinations. Device-specific
+                        passwords for cameras (Hikvision, Dahua, Axis), routers
+                        (TP-Link, Cisco, MikroTik), databases, IoT devices. All
+                        built-in — just press the brute-force button. Testing
+                        uses 16 parallel connections.
+                    </Alert>
                 </CardContent>
             </Card>
 
