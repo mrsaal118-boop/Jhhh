@@ -354,6 +354,45 @@ export async function runRealSimulation(
             }
             host.vulnerabilities = vulns;
 
+            // Enhanced vulnerability scan (Nmap NSE + banner grabbing)
+            if (openPorts.length > 0) {
+                try {
+                    const vulnResp = await fetch(getApiUrl('/api/vuln-scan'), {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            host: host.ip,
+                            openPorts: openPorts.map((p) => p.port)
+                        })
+                    });
+                    const vulnData = await vulnResp.json();
+                    if (vulnData.vulns?.length > 0) {
+                        for (const v of vulnData.vulns) {
+                            const desc =
+                                v.vuln || v.description || 'Unknown vuln';
+                            if (!vulns.includes(desc)) vulns.push(desc);
+                        }
+                    }
+                    if (vulnData.cves?.length > 0) {
+                        for (const cve of vulnData.cves) {
+                            vulns.push(`CVE: ${cve}`);
+                        }
+                        addEvent({
+                            type: 'scan',
+                            severity: 'warning',
+                            source: 'VulnScanner',
+                            target: host.ip,
+                            message: `CVEs found: ${vulnData.cves.join(', ')}`
+                        });
+                    }
+                    host.vulnerabilities = vulns;
+                } catch {
+                    // Enhanced vuln scan failed, keep basic results
+                }
+            }
+
             // OS fingerprinting via API
             let detectedOS = openPorts.some(
                 (p) => p.port === 445 || p.port === 3389 || p.port === 135
@@ -556,25 +595,116 @@ export async function runRealSimulation(
                     });
                 }
             } else {
-                const node = propagationTree.find((n) => n.ip === host.ip);
-                if (node) {
-                    node.status = 'failed';
-                    node.toolsUsed = toolsUsed;
-                }
-                const attemptCount = result.allResults?.length || 0;
+                // Fallback: Try THC Hydra brute-force with full credential DB
                 addEvent({
                     type: 'exploitation',
                     severity: 'info',
-                    source: 'Exploiter',
+                    source: 'Hydra',
                     target: host.ip,
-                    message: `All ${attemptCount} exploitation attempts failed against ${
-                        host.ip
-                    }${
-                        toolsUsed.length > 0
-                            ? ` [Tools tried: ${toolsUsed.join(', ')}]`
-                            : ''
-                    }`
+                    message: `Built-in exploit failed. Trying Hydra brute-force on ${host.ip}...`
                 });
+
+                let hydraSuccess = false;
+                const sshPort = openPorts.find((p) => p.port === 22);
+                const smbPort = openPorts.find((p) => p.port === 445);
+                const ftpPort = openPorts.find((p) => p.port === 21);
+                const hydraTarget = sshPort || ftpPort || smbPort;
+
+                if (hydraTarget) {
+                    try {
+                        const hydraService =
+                            hydraTarget.port === 22
+                                ? 'ssh'
+                                : hydraTarget.port === 21
+                                  ? 'ftp'
+                                  : 'smb';
+                        const hydraResp = await fetch(
+                            getApiUrl('/api/hydra-attack'),
+                            {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    host: host.ip,
+                                    port: hydraTarget.port,
+                                    service: hydraService,
+                                    deviceType: 'Unknown',
+                                    usernames: config.credentials.map(
+                                        (c) => c.username
+                                    ),
+                                    passwords: config.credentials.map(
+                                        (c) => c.password
+                                    ),
+                                    tasks: 16
+                                })
+                            }
+                        );
+                        const hydraResult = await hydraResp.json();
+                        if (
+                            hydraResult.success ||
+                            hydraResult.found?.length > 0
+                        ) {
+                            hydraSuccess = true;
+                            const found = hydraResult.found?.[0] || hydraResult;
+                            host.exploited = true;
+                            host.exploitMethod = `Hydra-${hydraService} (${
+                                found.username || hydraResult.username
+                            })`;
+                            exploitCount++;
+
+                            const node = propagationTree.find(
+                                (n) => n.ip === host.ip
+                            );
+                            if (node) {
+                                node.status = 'exploited';
+                                node.exploitUsed = `Hydra-${hydraService}: ${
+                                    found.username || hydraResult.username
+                                }`;
+                                node.toolsUsed = [
+                                    ...(toolsUsed || []),
+                                    hydraResult.tool || 'hydra'
+                                ];
+                            }
+
+                            addEvent({
+                                type: 'exploitation',
+                                severity: 'success',
+                                source: 'Hydra',
+                                target: host.ip,
+                                message: `Hydra brute-force successful via ${hydraService}: ${
+                                    found.username || hydraResult.username
+                                }:${found.password || hydraResult.password} [${
+                                    hydraResult.tool || 'hydra'
+                                }]`
+                            });
+                        }
+                    } catch {
+                        // Hydra attack failed
+                    }
+                }
+
+                if (!hydraSuccess) {
+                    const node = propagationTree.find((n) => n.ip === host.ip);
+                    if (node) {
+                        node.status = 'failed';
+                        node.toolsUsed = toolsUsed;
+                    }
+                    const attemptCount = result.allResults?.length || 0;
+                    addEvent({
+                        type: 'exploitation',
+                        severity: 'info',
+                        source: 'Exploiter',
+                        target: host.ip,
+                        message: `All ${attemptCount} exploitation attempts failed against ${
+                            host.ip
+                        } (including Hydra)${
+                            toolsUsed.length > 0
+                                ? ` [Tools tried: ${toolsUsed.join(', ')}]`
+                                : ''
+                        }`
+                    });
+                }
             }
         } catch {
             const node = propagationTree.find((n) => n.ip === host.ip);
@@ -630,8 +760,8 @@ export async function runRealSimulation(
     for (let ei = 0; ei < exploitedHosts.length; ei++) {
         const host = exploitedHosts[ei];
         try {
-            // Deploy smart monkey agent
-            const resp = await fetch(getApiUrl('/api/post-exploit-agent'), {
+            // Deploy Sliver-enhanced smart monkey agent
+            const resp = await fetch(getApiUrl('/api/sliver-agent'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -643,28 +773,34 @@ export async function runRealSimulation(
                 })
             });
             const agentData = await resp.json();
-            if (agentData.systemInfo?.os) host.os = agentData.systemInfo.os;
+            if (agentData.systemInfo?.full)
+                host.os =
+                    agentData.systemInfo.full.substring(0, 100) || host.os;
+
+            const techCount = agentData.techniques?.length || 0;
+            const pivotCount = agentData.pivotPoints?.length || 0;
+            const lateralCount = agentData.lateralTargets?.length || 0;
+            const credCount = agentData.credentialsFound?.length || 0;
 
             addEvent({
                 type: 'credentials',
                 severity: 'warning',
                 source: host.ip,
                 target: 'Island',
-                message: `Smart agent deployed: system info collected, ${
-                    agentData.discoveredHosts?.length || 0
-                } neighboring hosts discovered`
+                message: `Sliver agent deployed: ${techCount} techniques executed, ${lateralCount} lateral targets, ${pivotCount} pivot points, ${credCount} credential sources found`
             });
 
-            // If agent discovered new hosts, add them to scan results
-            if (
-                agentData.discoveredHosts &&
-                agentData.discoveredHosts.length > 0
-            ) {
+            // Add discovered lateral targets + pivot points
+            const allDiscovered = [
+                ...(agentData.lateralTargets || []),
+                ...(agentData.pivotPoints || [])
+            ];
+            if (allDiscovered.length > 0) {
                 const existingIps = hosts.map((h) => h.ip);
-                const newNeighbors = agentData.discoveredHosts.filter(
+                const newNeighbors = allDiscovered.filter(
                     (ip: string) => !existingIps.includes(ip)
                 );
-                for (const neighborIp of newNeighbors.slice(0, 10)) {
+                for (const neighborIp of newNeighbors.slice(0, 15)) {
                     propagationTree.push({
                         id: `node-${neighborIp}`,
                         ip: neighborIp,
@@ -681,22 +817,54 @@ export async function runRealSimulation(
                         severity: 'info',
                         source: host.ip,
                         target: neighborIp,
-                        message: `Neighboring host discovered via post-exploitation agent on ${host.ip}`
+                        message: `Neighboring host discovered via Sliver agent on ${host.ip}`
                     });
                 }
             }
 
-            // Log sensitive files if found
-            if (agentData.systemInfo?.sensitiveFiles) {
+            // Log credential sources found
+            if (agentData.credentialsFound?.length > 0) {
+                for (const credSrc of agentData.credentialsFound) {
+                    addEvent({
+                        type: 'credentials',
+                        severity: 'warning',
+                        source: host.ip,
+                        target: 'Island',
+                        message: `Credentials source [${credSrc.type}]: ${
+                            typeof credSrc.data === 'string'
+                                ? credSrc.data.substring(0, 200)
+                                : JSON.stringify(credSrc.data).substring(0, 200)
+                        }`
+                    });
+                }
+            }
+
+            // Log ATT&CK techniques used by Sliver agent
+            if (agentData.techniques?.length > 0) {
+                const successTechs = agentData.techniques
+                    .filter((t: { success: boolean }) => t.success)
+                    .map(
+                        (t: { id: string; name: string }) => `${t.id}:${t.name}`
+                    );
+                if (successTechs.length > 0) {
+                    addEvent({
+                        type: 'exploitation',
+                        severity: 'info',
+                        source: 'Sliver-Agent',
+                        target: host.ip,
+                        message: `ATT&CK Techniques: ${successTechs.join(', ')}`
+                    });
+                }
+            }
+
+            // Log network mapping
+            if (agentData.networkMap?.length > 0) {
                 addEvent({
-                    type: 'credentials',
-                    severity: 'warning',
+                    type: 'scan',
+                    severity: 'info',
                     source: host.ip,
                     target: 'Island',
-                    message: `Sensitive files found: ${agentData.systemInfo.sensitiveFiles.substring(
-                        0,
-                        200
-                    )}`
+                    message: `Network map collected: ${agentData.networkMap.length} interface/route entries`
                 });
             }
 
@@ -704,7 +872,9 @@ export async function runRealSimulation(
             const node = propagationTree.find((n) => n.ip === host.ip);
             if (node) {
                 node.status = 'exploited';
-                if (agentData.systemInfo?.os) node.os = agentData.systemInfo.os;
+                if (agentData.systemInfo?.full)
+                    node.os =
+                        agentData.systemInfo.full.substring(0, 50) || node.os;
             }
         } catch {
             // Fallback to basic post-exploit

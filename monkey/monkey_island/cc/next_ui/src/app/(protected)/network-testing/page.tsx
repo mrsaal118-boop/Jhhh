@@ -46,6 +46,7 @@ import BugReportIcon from '@mui/icons-material/BugReport';
 import AddIcon from '@mui/icons-material/Add';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import SecurityIcon from '@mui/icons-material/Security';
+import WarningIcon from '@mui/icons-material/Warning';
 
 interface DiscoveredHost {
     ip: string;
@@ -363,11 +364,12 @@ export default function NetworkTestingPage() {
             const cred = credResults[key];
             setPostExploitRunning(true);
             setStatusMessage(
-                `Running post-exploitation agent on ${host.ip}...`
+                `Deploying Sliver-enhanced agent on ${host.ip}...`
             );
 
             try {
-                const resp = await fetch(`${apiBase}/api/post-exploit-agent`, {
+                // Use Sliver-inspired agent for deeper post-exploitation
+                const resp = await fetch(`${apiBase}/api/sliver-agent`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -385,29 +387,32 @@ export default function NetworkTestingPage() {
                 setPostExploitResults(result);
                 setDetailDialog(true);
                 setStatusMessage(
-                    `Post-exploitation complete on ${host.ip}. Found ${
-                        result.discoveredHosts?.length || 0
-                    } new hosts.`
+                    `Sliver agent complete on ${host.ip}. Found ${
+                        result.lateralTargets?.length || 0
+                    } lateral targets, ${
+                        result.pivotPoints?.length || 0
+                    } pivot points.`
                 );
 
-                if (
-                    result.discoveredHosts &&
-                    result.discoveredHosts.length > 0
-                ) {
+                // Add discovered lateral targets
+                const discoveredHosts = [
+                    ...(result.lateralTargets || []),
+                    ...(result.pivotPoints || [])
+                ];
+                if (discoveredHosts.length > 0) {
                     const existingIps = hosts.map((h) => h.ip);
-                    const newHosts = result.discoveredHosts.filter(
+                    const newHosts = discoveredHosts.filter(
                         (ip: string) => !existingIps.includes(ip)
                     );
                     if (newHosts.length > 0) {
                         setStatusMessage(
-                            (prev) =>
-                                `${prev} Discovered ${newHosts.length} new neighboring hosts!`
+                            `Discovered ${newHosts.length} new neighboring hosts via Sliver agent!`
                         );
                     }
                 }
             } catch (err) {
                 setStatusMessage(
-                    `Post-exploit error: ${
+                    `Agent error: ${
                         err instanceof Error ? err.message : 'Unknown'
                     }`
                 );
@@ -415,6 +420,94 @@ export default function NetworkTestingPage() {
             setPostExploitRunning(false);
         },
         [apiBase, credResults, hosts]
+    );
+
+    const runHydraAttack = useCallback(
+        async (host: DiscoveredHost) => {
+            setTestingCredentials(true);
+            setStatusMessage(`Running Hydra brute-force on ${host.ip}...`);
+
+            const services: string[] = [];
+            if (host.openPorts.includes(22)) services.push('ssh');
+            if (host.openPorts.includes(21)) services.push('ftp');
+            if (host.openPorts.includes(445)) services.push('smb');
+            if (host.openPorts.includes(23)) services.push('telnet');
+            if (host.openPorts.includes(3306)) services.push('mysql');
+
+            for (const svc of services) {
+                try {
+                    const resp = await fetch(`${apiBase}/api/hydra-attack`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            host: host.ip,
+                            port:
+                                svc === 'ssh'
+                                    ? 22
+                                    : svc === 'ftp'
+                                      ? 21
+                                      : svc === 'smb'
+                                        ? 445
+                                        : 23,
+                            service: svc,
+                            deviceType: host.deviceType,
+                            usernames: credentials.map((c) => c.username),
+                            passwords: credentials.map((c) => c.password),
+                            tasks: 16
+                        })
+                    });
+                    const result = await resp.json();
+                    if (result.success || result.found?.length > 0) {
+                        const found = result.found?.[0] || result;
+                        setCredResults((prev) => ({
+                            ...prev,
+                            [`${host.ip}:${svc}`]: {
+                                host: host.ip,
+                                port: parseInt(found.port) || 22,
+                                service: svc,
+                                success: true,
+                                username: found.username || result.username,
+                                password: found.password || result.password,
+                                method: `Hydra-${svc}`,
+                                info: `${result.tool || 'hydra'}: Login found`
+                            }
+                        }));
+                    }
+                } catch {
+                    // Service test failed
+                }
+            }
+            setStatusMessage(`Hydra attack complete on ${host.ip}`);
+            setTestingCredentials(false);
+        },
+        [apiBase, credentials]
+    );
+
+    const runVulnScan = useCallback(
+        async (host: DiscoveredHost) => {
+            setStatusMessage(`Running vulnerability scan on ${host.ip}...`);
+            try {
+                const resp = await fetch(`${apiBase}/api/vuln-scan`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        host: host.ip,
+                        openPorts: host.openPorts
+                    })
+                });
+                const result = await resp.json();
+                setStatusMessage(
+                    `Vuln scan complete: ${
+                        result.vulns?.length || 0
+                    } vulnerabilities, ${result.cves?.length || 0} CVEs found`
+                );
+            } catch {
+                setStatusMessage(`Vuln scan failed for ${host.ip}`);
+            }
+        },
+        [apiBase]
     );
 
     const addCredential = () => {
@@ -936,8 +1029,39 @@ export default function NetworkTestingPage() {
                                                                 </IconButton>
                                                             </Tooltip>
                                                         )}
+                                                        <Tooltip title="Hydra Brute-Force (THC Hydra)">
+                                                            <IconButton
+                                                                size="small"
+                                                                onClick={() =>
+                                                                    runHydraAttack(
+                                                                        host
+                                                                    )
+                                                                }
+                                                                disabled={
+                                                                    testingCredentials
+                                                                }
+                                                                sx={{
+                                                                    color: '#e91e63'
+                                                                }}>
+                                                                <SecurityIcon fontSize="small" />
+                                                            </IconButton>
+                                                        </Tooltip>
+                                                        <Tooltip title="Vulnerability Scan">
+                                                            <IconButton
+                                                                size="small"
+                                                                onClick={() =>
+                                                                    runVulnScan(
+                                                                        host
+                                                                    )
+                                                                }
+                                                                sx={{
+                                                                    color: '#ff5722'
+                                                                }}>
+                                                                <WarningIcon fontSize="small" />
+                                                            </IconButton>
+                                                        </Tooltip>
                                                         {hasSuccess && (
-                                                            <Tooltip title="Deploy Monkey Agent">
+                                                            <Tooltip title="Deploy Sliver Agent">
                                                                 <IconButton
                                                                     size="small"
                                                                     onClick={() =>
