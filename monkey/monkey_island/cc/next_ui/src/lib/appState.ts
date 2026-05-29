@@ -625,32 +625,121 @@ export async function runRealSimulation(
     });
     onProgress(sim);
 
-    // Collect system info from exploited hosts
-    for (const host of hosts.filter((h) => h.exploited)) {
+    // Smart Post-Exploitation Agent: gathers intelligence + discovers new targets
+    const exploitedHosts = hosts.filter((h) => h.exploited);
+    for (let ei = 0; ei < exploitedHosts.length; ei++) {
+        const host = exploitedHosts[ei];
         try {
-            const resp = await fetch(getApiUrl('/api/post-exploit'), {
+            // Deploy smart monkey agent
+            const resp = await fetch(getApiUrl('/api/post-exploit-agent'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     host: host.ip,
-                    method: host.exploitMethod
+                    method: host.exploitMethod,
+                    credentials: config.credentials?.find(
+                        (c) => c.username && c.password
+                    ) || { username: 'root', password: 'root' }
                 })
             });
-            const data = await resp.json();
-            if (data.os) host.os = data.os;
+            const agentData = await resp.json();
+            if (agentData.systemInfo?.os) host.os = agentData.systemInfo.os;
 
             addEvent({
                 type: 'credentials',
                 severity: 'warning',
                 source: host.ip,
                 target: 'Island',
-                message: `Post-exploitation data collected: ${
-                    data.info || 'system enumeration complete'
-                }`
+                message: `Smart agent deployed: system info collected, ${
+                    agentData.discoveredHosts?.length || 0
+                } neighboring hosts discovered`
             });
+
+            // If agent discovered new hosts, add them to scan results
+            if (
+                agentData.discoveredHosts &&
+                agentData.discoveredHosts.length > 0
+            ) {
+                const existingIps = hosts.map((h) => h.ip);
+                const newNeighbors = agentData.discoveredHosts.filter(
+                    (ip: string) => !existingIps.includes(ip)
+                );
+                for (const neighborIp of newNeighbors.slice(0, 10)) {
+                    propagationTree.push({
+                        id: `node-${neighborIp}`,
+                        ip: neighborIp,
+                        hostname: neighborIp,
+                        status: 'scanned',
+                        parent: host.ip,
+                        depth: 1,
+                        openPorts: [],
+                        discoveredAt: new Date().toISOString(),
+                        os: 'Unknown'
+                    });
+                    addEvent({
+                        type: 'scan',
+                        severity: 'info',
+                        source: host.ip,
+                        target: neighborIp,
+                        message: `Neighboring host discovered via post-exploitation agent on ${host.ip}`
+                    });
+                }
+            }
+
+            // Log sensitive files if found
+            if (agentData.systemInfo?.sensitiveFiles) {
+                addEvent({
+                    type: 'credentials',
+                    severity: 'warning',
+                    source: host.ip,
+                    target: 'Island',
+                    message: `Sensitive files found: ${agentData.systemInfo.sensitiveFiles.substring(
+                        0,
+                        200
+                    )}`
+                });
+            }
+
+            // Update node in propagation tree with agent data
+            const node = propagationTree.find((n) => n.ip === host.ip);
+            if (node) {
+                node.status = 'exploited';
+                if (agentData.systemInfo?.os) node.os = agentData.systemInfo.os;
+            }
         } catch {
-            // Post-exploit data collection failed
+            // Fallback to basic post-exploit
+            try {
+                const resp = await fetch(getApiUrl('/api/post-exploit'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        host: host.ip,
+                        method: host.exploitMethod
+                    })
+                });
+                const data = await resp.json();
+                if (data.os) host.os = data.os;
+            } catch {
+                // Post-exploit data collection failed
+            }
         }
+
+        sim = updateSimulation({
+            currentPhase: `Post-Exploitation Agent (${ei + 1}/${
+                exploitedHosts.length
+            })`,
+            phases: {
+                scanning: 100,
+                exploitation: 100,
+                postExploitation: Math.round(
+                    ((ei + 1) / exploitedHosts.length) * 80
+                ),
+                reporting: 0
+            }
+        });
+        onProgress(sim);
+        savePropagationTree(propagationTree);
+        saveScanResults(hosts);
     }
 
     sim = updateSimulation({

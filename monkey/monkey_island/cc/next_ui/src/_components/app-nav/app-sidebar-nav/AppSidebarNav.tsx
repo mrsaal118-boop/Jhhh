@@ -22,6 +22,7 @@ import InfoIcon from '@mui/icons-material/Info';
 import EventNoteIcon from '@mui/icons-material/EventNote';
 import SecurityIcon from '@mui/icons-material/Security';
 import AccountTreeIcon from '@mui/icons-material/AccountTree';
+import WifiTetheringIcon from '@mui/icons-material/WifiTethering';
 import LogoutButton from '@/_components/logout-button/LogoutButton';
 import { PATHS } from '@/constants/paths.constants';
 
@@ -46,7 +47,13 @@ const mainNavItems: NavItem[] = [
         label: 'Propagation Tree',
         icon: <AccountTreeIcon />
     },
-    { path: PATHS.EVENTS, label: 'Events', icon: <EventNoteIcon /> }
+    { path: PATHS.EVENTS, label: 'Events', icon: <EventNoteIcon /> },
+    {
+        path: PATHS.NETWORK_TESTING,
+        label: 'Network Testing',
+        icon: <WifiTetheringIcon />,
+        badge: 'NEW'
+    }
 ];
 
 const analysisNavItems: NavItem[] = [
