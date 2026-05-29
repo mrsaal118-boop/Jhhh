@@ -101,12 +101,35 @@ interface WifiNetwork {
 
 interface AgentResult {
     agentId: string;
+    implantType: string;
     connected: boolean;
-    discoveredDevices: { ip: string; alive: boolean }[];
-    cameras: { ip: string; port: number; type: string }[];
+    discoveredDevices: {
+        ip: string;
+        alive: boolean;
+        ttl?: number;
+        os?: string;
+        openPorts?: number[];
+        deviceType?: string;
+    }[];
+    cameras: { ip: string; port: number; type: string; banner?: string }[];
+    iotDevices: { ip: string; port: number; type: string }[];
     encryption: string;
+    callbackProtocol: string;
     architectures: string[];
     status: string;
+    publicKey: string;
+    phases: { name: string; status: string }[];
+    networkInfo: {
+        gateway?: string;
+        subnet?: string;
+        dns?: string;
+        arp?: { ip: string; mac: string }[];
+    };
+    callbackInfo?: {
+        transport: string;
+        cipher: string;
+        heartbeatInterval: string;
+    };
 }
 
 const deviceIcons: Record<string, React.ReactNode> = {
@@ -921,14 +944,39 @@ export default function NetworkTestingPage() {
                                 <Typography
                                     variant="h6"
                                     sx={{ color: '#f44336' }}>
-                                    🐵 Monkey Agent Deployed
+                                    🐵 Monkey Agent Deployed (Sliver-style)
                                 </Typography>
                                 <Divider sx={{ my: 1 }} />
+
+                                {/* Agent phases */}
+                                {agentResult.phases && (
+                                    <Box sx={{ mb: 2 }}>
+                                        {agentResult.phases.map((p, i) => (
+                                            <Chip
+                                                key={i}
+                                                label={`${p.name}: ${p.status}`}
+                                                size="small"
+                                                color={
+                                                    p.status === 'complete'
+                                                        ? 'success'
+                                                        : 'warning'
+                                                }
+                                                sx={{ mr: 0.5, mb: 0.5 }}
+                                            />
+                                        ))}
+                                    </Box>
+                                )}
+
                                 <Grid container spacing={2}>
                                     <Grid item xs={6}>
                                         <Typography variant="body2">
                                             <strong>Agent ID:</strong>{' '}
-                                            {agentResult.agentId}
+                                            <code>{agentResult.agentId}</code>
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Implant Type:</strong>{' '}
+                                            {agentResult.implantType ||
+                                                'monkey-beacon'}
                                         </Typography>
                                         <Typography variant="body2">
                                             <strong>Status:</strong>{' '}
@@ -942,6 +990,11 @@ export default function NetworkTestingPage() {
                                             <strong>Encryption:</strong>{' '}
                                             {agentResult.encryption}
                                         </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Callback:</strong>{' '}
+                                            {agentResult.callbackProtocol ||
+                                                'mTLS over TCP'}
+                                        </Typography>
                                     </Grid>
                                     <Grid item xs={6}>
                                         <Typography variant="body2">
@@ -952,17 +1005,43 @@ export default function NetworkTestingPage() {
                                             }
                                         </Typography>
                                         <Typography variant="body2">
-                                            <strong>Cameras Found:</strong>{' '}
+                                            <strong>Cameras:</strong>{' '}
                                             {agentResult.cameras?.length || 0}
                                         </Typography>
                                         <Typography variant="body2">
-                                            <strong>Architectures:</strong>{' '}
-                                            {agentResult.architectures?.join(
-                                                ', '
-                                            )}
+                                            <strong>IoT Devices:</strong>{' '}
+                                            {agentResult.iotDevices?.length ||
+                                                0}
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Gateway:</strong>{' '}
+                                            {agentResult.networkInfo?.gateway ||
+                                                'N/A'}
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>ARP Entries:</strong>{' '}
+                                            {agentResult.networkInfo?.arp
+                                                ?.length || 0}
                                         </Typography>
                                     </Grid>
                                 </Grid>
+
+                                <Typography variant="body2" sx={{ mt: 1 }}>
+                                    <strong>Architectures:</strong>{' '}
+                                    {agentResult.architectures?.map((a, i) => (
+                                        <Chip
+                                            key={i}
+                                            label={a}
+                                            size="small"
+                                            sx={{
+                                                mr: 0.5,
+                                                mt: 0.5,
+                                                bgcolor: 'rgba(33,150,243,0.2)'
+                                            }}
+                                        />
+                                    ))}
+                                </Typography>
+
                                 {agentResult.cameras &&
                                     agentResult.cameras.length > 0 && (
                                         <Box sx={{ mt: 1 }}>
@@ -987,6 +1066,110 @@ export default function NetworkTestingPage() {
                                                     />
                                                 )
                                             )}
+                                        </Box>
+                                    )}
+
+                                {agentResult.iotDevices &&
+                                    agentResult.iotDevices.length > 0 && (
+                                        <Box sx={{ mt: 1 }}>
+                                            <Typography
+                                                variant="subtitle2"
+                                                sx={{ color: '#4caf50' }}>
+                                                IoT / Network Devices:
+                                            </Typography>
+                                            {agentResult.iotDevices.map(
+                                                (dev, i) => (
+                                                    <Chip
+                                                        key={i}
+                                                        label={`${dev.ip}:${dev.port} (${dev.type})`}
+                                                        size="small"
+                                                        sx={{
+                                                            mr: 0.5,
+                                                            mt: 0.5,
+                                                            bgcolor:
+                                                                'rgba(76,175,80,0.2)'
+                                                        }}
+                                                        icon={<RouterIcon />}
+                                                    />
+                                                )
+                                            )}
+                                        </Box>
+                                    )}
+
+                                {/* Discovered hosts with OS info */}
+                                {agentResult.discoveredDevices &&
+                                    agentResult.discoveredDevices.length >
+                                        0 && (
+                                        <Box sx={{ mt: 1 }}>
+                                            <Typography
+                                                variant="subtitle2"
+                                                sx={{ color: '#2196f3' }}>
+                                                Network Hosts (
+                                                {
+                                                    agentResult
+                                                        .discoveredDevices
+                                                        .length
+                                                }
+                                                ):
+                                            </Typography>
+                                            <TableContainer
+                                                component={Paper}
+                                                sx={{
+                                                    bgcolor: 'rgba(0,0,0,0.2)',
+                                                    maxHeight: 200
+                                                }}>
+                                                <Table size="small">
+                                                    <TableHead>
+                                                        <TableRow>
+                                                            <TableCell>
+                                                                IP
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                OS
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                TTL
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                Type
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                Open Ports
+                                                            </TableCell>
+                                                        </TableRow>
+                                                    </TableHead>
+                                                    <TableBody>
+                                                        {agentResult.discoveredDevices
+                                                            .slice(0, 20)
+                                                            .map((dev, i) => (
+                                                                <TableRow
+                                                                    key={i}>
+                                                                    <TableCell>
+                                                                        {dev.ip}
+                                                                    </TableCell>
+                                                                    <TableCell>
+                                                                        {dev.os ||
+                                                                            'Unknown'}
+                                                                    </TableCell>
+                                                                    <TableCell>
+                                                                        {dev.ttl ||
+                                                                            '-'}
+                                                                    </TableCell>
+                                                                    <TableCell>
+                                                                        {dev.deviceType ||
+                                                                            '-'}
+                                                                    </TableCell>
+                                                                    <TableCell>
+                                                                        {dev.openPorts?.join(
+                                                                            ', '
+                                                                        ) ||
+                                                                            '-'}
+                                                                    </TableCell>
+                                                                </TableRow>
+                                                            ))}
+                                                    </TableBody>
+                                                </Table>
+                                            </TableContainer>
                                         </Box>
                                     )}
                             </CardContent>
