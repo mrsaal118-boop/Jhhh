@@ -71,6 +71,15 @@ interface CredentialResult {
     method?: string;
     info?: string;
     attempts?: number;
+    total?: number;
+}
+
+interface CameraScanResult {
+    host: string;
+    brand: string;
+    brandName: string;
+    rtspStreams: string[];
+    credentials: CredentialResult;
 }
 
 interface PostExploitResult {
@@ -118,15 +127,25 @@ export default function NetworkTestingPage() {
     const [postExploitRunning, setPostExploitRunning] = useState(false);
     const [postExploitResults, setPostExploitResults] =
         useState<PostExploitResult | null>(null);
+    const [cameraResults, setCameraResults] = useState<
+        Record<string, CameraScanResult>
+    >({});
     const [detailDialog, setDetailDialog] = useState(false);
+    const [cameraDialog, setCameraDialog] = useState(false);
+    const [selectedCameraResult, setSelectedCameraResult] =
+        useState<CameraScanResult | null>(null);
     const [statusMessage, setStatusMessage] = useState('');
+    const [credDbInfo, setCredDbInfo] = useState<{
+        total: number;
+        counts: Record<string, number>;
+    } | null>(null);
 
     const apiBase =
         typeof window !== 'undefined'
             ? location.protocol + '//' + location.host
             : '';
 
-    // Detect local subnets on mount
+    // Detect local subnets and load credential DB on mount
     useEffect(() => {
         fetch(`${apiBase}/api/network-info`)
             .then((r) => r.json())
@@ -150,6 +169,10 @@ export default function NetworkTestingPage() {
                     if (subnets.length > 0 && !subnet) setSubnet(subnets[0]);
                 }
             })
+            .catch(() => {});
+        fetch(`${apiBase}/api/credential-db`)
+            .then((r) => r.json())
+            .then((data) => setCredDbInfo(data))
             .catch(() => {});
     }, [apiBase]);
 
@@ -182,7 +205,9 @@ export default function NetworkTestingPage() {
     const testPasswordsOnHost = useCallback(
         async (host: DiscoveredHost) => {
             setTestingCredentials(true);
-            setStatusMessage(`Testing credentials on ${host.ip}...`);
+            setStatusMessage(
+                `Testing credentials on ${host.ip} (${host.deviceType})...`
+            );
 
             const servicesToTest: { port: number; service: string }[] = [];
             host.openPorts.forEach((p) => {
@@ -201,20 +226,53 @@ export default function NetworkTestingPage() {
                     });
                 if (p === 3389)
                     servicesToTest.push({ port: 3389, service: 'rdp' });
+                if (p === 80 || p === 8080)
+                    servicesToTest.push({ port: p, service: 'http' });
             });
 
+            // Camera-specific scan
+            if (host.deviceType === 'Camera') {
+                try {
+                    const resp = await fetch(`${apiBase}/api/scan-camera`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            host: host.ip,
+                            openPorts: host.openPorts
+                        })
+                    });
+                    const camResult = await resp.json();
+                    setCameraResults((prev) => ({
+                        ...prev,
+                        [host.ip]: camResult
+                    }));
+                    if (camResult.credentials?.success) {
+                        setCredResults((prev) => ({
+                            ...prev,
+                            [`${host.ip}:camera`]: camResult.credentials
+                        }));
+                    }
+                    setStatusMessage(
+                        `Camera scan complete: ${camResult.brandName} - ${
+                            camResult.rtspStreams?.length || 0
+                        } RTSP streams found`
+                    );
+                } catch {
+                    // Camera scan failed, continue with regular testing
+                }
+            }
+
             if (servicesToTest.length === 0) {
-                setStatusMessage(
-                    `No testable services on ${host.ip} (no SSH/FTP/SMB/Telnet/MySQL/PostgreSQL ports open)`
-                );
+                setStatusMessage(`No testable services on ${host.ip}`);
                 setTestingCredentials(false);
                 return;
             }
 
+            // Use parallel testing with built-in credential DB
             for (const svc of servicesToTest) {
                 try {
                     const resp = await fetch(
-                        `${apiBase}/api/batch-test-credentials`,
+                        `${apiBase}/api/parallel-test-credentials`,
                         {
                             method: 'POST',
                             headers: {
@@ -224,7 +282,9 @@ export default function NetworkTestingPage() {
                                 host: host.ip,
                                 port: svc.port,
                                 service: svc.service,
-                                credentials
+                                deviceType: host.deviceType,
+                                credentials,
+                                concurrency: 8
                             })
                         }
                     );
@@ -251,6 +311,30 @@ export default function NetworkTestingPage() {
             setTestingCredentials(false);
         },
         [apiBase, credentials]
+    );
+
+    const scanCameraDevice = useCallback(
+        async (host: DiscoveredHost) => {
+            setStatusMessage(`Scanning camera ${host.ip}...`);
+            try {
+                const resp = await fetch(`${apiBase}/api/scan-camera`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        host: host.ip,
+                        openPorts: host.openPorts
+                    })
+                });
+                const result = await resp.json();
+                setCameraResults((prev) => ({ ...prev, [host.ip]: result }));
+                setSelectedCameraResult(result);
+                setCameraDialog(true);
+                setStatusMessage(`Camera scan complete: ${result.brandName}`);
+            } catch {
+                setStatusMessage(`Camera scan failed for ${host.ip}`);
+            }
+        },
+        [apiBase]
     );
 
     const testAllHosts = useCallback(async () => {
@@ -543,6 +627,22 @@ export default function NetworkTestingPage() {
                             Add
                         </Button>
                     </Box>
+                    {credDbInfo && (
+                        <Alert
+                            severity="info"
+                            sx={{ mt: 1 }}
+                            icon={<SecurityIcon />}>
+                            Built-in credential database: {credDbInfo.total}{' '}
+                            passwords (Cameras:{' '}
+                            {credDbInfo.counts?.cameras || 0}, Hikvision:{' '}
+                            {credDbInfo.counts?.hikvision || 0}, Dahua:{' '}
+                            {credDbInfo.counts?.dahua || 0}, Routers:{' '}
+                            {credDbInfo.counts?.routers || 0}, SSH:{' '}
+                            {credDbInfo.counts?.ssh || 0}, SMB:{' '}
+                            {credDbInfo.counts?.smb || 0}) + your custom
+                            credentials. Testing uses 8 parallel connections.
+                        </Alert>
+                    )}
                 </CardContent>
             </Card>
 
@@ -641,6 +741,8 @@ export default function NetworkTestingPage() {
                                         const hasSuccess = hasSuccessfulCred(
                                             host.ip
                                         );
+                                        const camResult =
+                                            cameraResults[host.ip];
                                         return (
                                             <TableRow
                                                 key={host.ip}
@@ -695,6 +797,22 @@ export default function NetworkTestingPage() {
                                                         color="text.secondary">
                                                         {host.os || 'Unknown'}
                                                     </Typography>
+                                                    {camResult && (
+                                                        <Chip
+                                                            label={
+                                                                camResult.brandName
+                                                            }
+                                                            size="small"
+                                                            sx={{
+                                                                ml: 0.5,
+                                                                bgcolor:
+                                                                    'rgba(244,67,54,0.2)',
+                                                                fontSize:
+                                                                    '0.65rem',
+                                                                height: 18
+                                                            }}
+                                                        />
+                                                    )}
                                                 </TableCell>
                                                 <TableCell>
                                                     <Box
@@ -801,6 +919,23 @@ export default function NetworkTestingPage() {
                                                                 <VpnKeyIcon fontSize="small" />
                                                             </IconButton>
                                                         </Tooltip>
+                                                        {host.deviceType ===
+                                                            'Camera' && (
+                                                            <Tooltip title="Scan Camera">
+                                                                <IconButton
+                                                                    size="small"
+                                                                    onClick={() =>
+                                                                        scanCameraDevice(
+                                                                            host
+                                                                        )
+                                                                    }
+                                                                    sx={{
+                                                                        color: '#f44336'
+                                                                    }}>
+                                                                    <VideocamIcon fontSize="small" />
+                                                                </IconButton>
+                                                            </Tooltip>
+                                                        )}
                                                         {hasSuccess && (
                                                             <Tooltip title="Deploy Monkey Agent">
                                                                 <IconButton
@@ -1014,6 +1149,145 @@ export default function NetworkTestingPage() {
                 </DialogContent>
                 <DialogActions sx={{ bgcolor: '#1a1a2e' }}>
                     <Button onClick={() => setDetailDialog(false)}>
+                        Close
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* Camera Scan Results Dialog */}
+            <Dialog
+                open={cameraDialog}
+                onClose={() => setCameraDialog(false)}
+                maxWidth="md"
+                fullWidth>
+                <DialogTitle
+                    sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        bgcolor: '#1a1a2e'
+                    }}>
+                    <VideocamIcon sx={{ color: '#f44336' }} />
+                    Camera Scan Results
+                </DialogTitle>
+                <DialogContent sx={{ bgcolor: '#16213e' }}>
+                    {selectedCameraResult && (
+                        <Box sx={{ mt: 2 }}>
+                            <Grid container spacing={2}>
+                                <Grid item xs={6}>
+                                    <Typography
+                                        variant="caption"
+                                        color="text.secondary">
+                                        Target
+                                    </Typography>
+                                    <Typography
+                                        variant="body1"
+                                        fontFamily="monospace">
+                                        {selectedCameraResult.host}
+                                    </Typography>
+                                </Grid>
+                                <Grid item xs={6}>
+                                    <Typography
+                                        variant="caption"
+                                        color="text.secondary">
+                                        Brand Detected
+                                    </Typography>
+                                    <Chip
+                                        label={selectedCameraResult.brandName}
+                                        color={
+                                            selectedCameraResult.brand !==
+                                            'unknown'
+                                                ? 'error'
+                                                : 'default'
+                                        }
+                                        size="small"
+                                    />
+                                </Grid>
+                            </Grid>
+                            <Divider sx={{ my: 2 }} />
+
+                            {selectedCameraResult.credentials?.success && (
+                                <Box sx={{ mb: 2 }}>
+                                    <Typography
+                                        variant="caption"
+                                        color="text.secondary">
+                                        Credentials Found
+                                    </Typography>
+                                    <Box
+                                        sx={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: 1,
+                                            mt: 0.5
+                                        }}>
+                                        <CheckCircleIcon
+                                            sx={{
+                                                color: '#00e676',
+                                                fontSize: 28
+                                            }}
+                                        />
+                                        <Typography
+                                            variant="body1"
+                                            sx={{
+                                                color: '#00e676',
+                                                fontWeight: 700,
+                                                fontFamily: 'monospace'
+                                            }}>
+                                            {
+                                                selectedCameraResult.credentials
+                                                    .username
+                                            }
+                                            :
+                                            {
+                                                selectedCameraResult.credentials
+                                                    .password
+                                            }
+                                        </Typography>
+                                    </Box>
+                                </Box>
+                            )}
+
+                            {selectedCameraResult.rtspStreams?.length > 0 && (
+                                <Box sx={{ mb: 2 }}>
+                                    <Typography
+                                        variant="caption"
+                                        color="text.secondary">
+                                        RTSP Streams Found (
+                                        {
+                                            selectedCameraResult.rtspStreams
+                                                .length
+                                        }
+                                        )
+                                    </Typography>
+                                    {selectedCameraResult.rtspStreams.map(
+                                        (url, i) => (
+                                            <Paper
+                                                key={i}
+                                                sx={{
+                                                    p: 1,
+                                                    mt: 0.5,
+                                                    bgcolor:
+                                                        'rgba(244,67,54,0.1)',
+                                                    border: '1px solid rgba(244,67,54,0.3)'
+                                                }}>
+                                                <Typography
+                                                    variant="body2"
+                                                    fontFamily="monospace"
+                                                    sx={{
+                                                        fontSize: '0.8rem'
+                                                    }}>
+                                                    {url}
+                                                </Typography>
+                                            </Paper>
+                                        )
+                                    )}
+                                </Box>
+                            )}
+                        </Box>
+                    )}
+                </DialogContent>
+                <DialogActions sx={{ bgcolor: '#1a1a2e' }}>
+                    <Button onClick={() => setCameraDialog(false)}>
                         Close
                     </Button>
                 </DialogActions>
