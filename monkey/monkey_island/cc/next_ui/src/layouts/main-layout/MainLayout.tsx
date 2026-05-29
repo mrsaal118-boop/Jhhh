@@ -1,31 +1,30 @@
 'use client';
 
-import MonkeyAppBar from '@/_components/app-nav/app-bar/AppBar';
-import AppDrawer from '@/_components/app-nav/app-drawer/appDrawer';
-import React, { useState } from 'react';
-import { styled } from '@mui/material/styles';
-import { appContentWrapper, mainLayout } from './style';
+import React from 'react';
+import Box from '@mui/material/Box';
+import AppSidebarNav from '@/_components/app-nav/app-sidebar-nav/AppSidebarNav';
+
+const SIDEBAR_WIDTH = 260;
 
 export default function MainLayout({
     children
 }: {
     children: React.ReactNode;
 }) {
-    const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-
-    const closeAppDrawer = () => {
-        setIsDrawerOpen(false);
-    };
-
-    // @ts-ignore
-    const MainLayout = styled('main')(mainLayout);
-    const AppContentWrapper = styled('main')(appContentWrapper);
-
     return (
-        <MainLayout>
-            <MonkeyAppBar setIsDrawerOpen={setIsDrawerOpen} />
-            <AppDrawer open={isDrawerOpen} onClose={closeAppDrawer} />
-            <AppContentWrapper>{children}</AppContentWrapper>
-        </MainLayout>
+        <Box sx={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+            <AppSidebarNav width={SIDEBAR_WIDTH} />
+            <Box
+                component="main"
+                sx={{
+                    flexGrow: 1,
+                    overflow: 'auto',
+                    backgroundColor: 'background.default',
+                    p: 3,
+                    ml: `${SIDEBAR_WIDTH}px`
+                }}>
+                {children}
+            </Box>
+        </Box>
     );
 }

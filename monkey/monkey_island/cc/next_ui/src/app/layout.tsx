@@ -6,11 +6,11 @@ import React from 'react';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-    title: 'Infection Monkey',
-    description: 'Adversary Emulation Platform'
+    title: 'Infection Monkey | Security Testing Platform',
+    description:
+        'Open-source adversary emulation platform for network security testing'
 };
 
-// This layout is used for all pages including the SSR pages (auth, 404, etc.)
 export default function RootLayout({
     children
 }: {
