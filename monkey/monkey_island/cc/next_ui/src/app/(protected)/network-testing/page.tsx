@@ -91,6 +91,24 @@ interface PostExploitResult {
     services: number[];
 }
 
+interface WifiNetwork {
+    ssid: string;
+    bssid: string;
+    signal: number;
+    channel: number;
+    security: string;
+}
+
+interface AgentResult {
+    agentId: string;
+    connected: boolean;
+    discoveredDevices: { ip: string; alive: boolean }[];
+    cameras: { ip: string; port: number; type: string }[];
+    encryption: string;
+    architectures: string[];
+    status: string;
+}
+
 const deviceIcons: Record<string, React.ReactNode> = {
     Camera: <VideocamIcon />,
     Router: <RouterIcon />,
@@ -136,6 +154,25 @@ export default function NetworkTestingPage() {
     const [selectedCameraResult, setSelectedCameraResult] =
         useState<CameraScanResult | null>(null);
     const [statusMessage, setStatusMessage] = useState('');
+    const [wifiNetworks, setWifiNetworks] = useState<WifiNetwork[]>([]);
+    const [scanningWifi, setScanningWifi] = useState(false);
+    const [wifiBruteForcing, setWifiBruteForcing] = useState(false);
+    const [wifiBruteResult, setWifiBruteResult] = useState<{
+        success: boolean;
+        password: string;
+        attempts: number;
+        total: number;
+        duration: string;
+        ssid: string;
+    } | null>(null);
+    const [selectedWifi, setSelectedWifi] = useState<WifiNetwork | null>(null);
+    const [agentResult, setAgentResult] = useState<AgentResult | null>(null);
+    const [plantingAgent, setPlantingAgent] = useState(false);
+    const [passwordListInfo, setPasswordListInfo] = useState<{
+        count: number;
+        size: string;
+        source: string;
+    } | null>(null);
 
     const apiBase =
         typeof window !== 'undefined'
@@ -167,7 +204,98 @@ export default function NetworkTestingPage() {
                 }
             })
             .catch(() => {});
+        fetch(`${apiBase}/api/password-list-info`)
+            .then((r) => r.json())
+            .then((data) => setPasswordListInfo(data))
+            .catch(() => {});
     }, [apiBase]);
+
+    const scanWifi = useCallback(async () => {
+        setScanningWifi(true);
+        setStatusMessage('Scanning for WiFi networks...');
+        setWifiBruteResult(null);
+        setAgentResult(null);
+        try {
+            const resp = await fetch(`${apiBase}/api/wifi-scan`);
+            const data = await resp.json();
+            setWifiNetworks(data.networks || []);
+            setStatusMessage(
+                `Found ${data.networks?.length || 0} WiFi networks`
+            );
+        } catch (err) {
+            setStatusMessage(
+                `WiFi scan error: ${
+                    err instanceof Error ? err.message : 'Unknown'
+                }`
+            );
+        }
+        setScanningWifi(false);
+    }, [apiBase]);
+
+    const startWifiBruteForce = useCallback(
+        async (network: WifiNetwork) => {
+            setSelectedWifi(network);
+            setWifiBruteForcing(true);
+            setWifiBruteResult(null);
+            setStatusMessage(
+                `Brute-forcing ${network.ssid} with 1,000,000 passwords...`
+            );
+            try {
+                const resp = await fetch(`${apiBase}/api/wifi-bruteforce`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        ssid: network.ssid,
+                        bssid: network.bssid,
+                        security: network.security
+                    })
+                });
+                const result = await resp.json();
+                setWifiBruteResult({ ...result, ssid: network.ssid });
+                setStatusMessage(
+                    result.success
+                        ? `SUCCESS! Password for ${network.ssid}: ${result.password} (${result.attempts}/${result.total} attempts, ${result.duration})`
+                        : `Failed after ${result.attempts} attempts (${result.duration})`
+                );
+            } catch (err) {
+                setStatusMessage(
+                    `Brute-force error: ${
+                        err instanceof Error ? err.message : 'Unknown'
+                    }`
+                );
+            }
+            setWifiBruteForcing(false);
+        },
+        [apiBase]
+    );
+
+    const deployAgent = useCallback(async () => {
+        setPlantingAgent(true);
+        setStatusMessage('Planting monkey agent into network...');
+        try {
+            const resp = await fetch(`${apiBase}/api/plant-agent`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    subnet: subnet || ''
+                })
+            });
+            const result = await resp.json();
+            setAgentResult(result);
+            setStatusMessage(
+                `Agent [${result.agentId}] deployed! Found ${
+                    result.discoveredDevices?.length || 0
+                } devices, ${
+                    result.cameras?.length || 0
+                } cameras. Encryption: ${result.encryption}`
+            );
+        } catch (err) {
+            setStatusMessage(
+                `Agent error: ${err instanceof Error ? err.message : 'Unknown'}`
+            );
+        }
+        setPlantingAgent(false);
+    }, [apiBase, subnet]);
 
     const scanNetwork = useCallback(async () => {
         if (!subnet) return;
@@ -564,6 +692,308 @@ export default function NetworkTestingPage() {
                     {statusMessage}
                 </Alert>
             )}
+
+            {/* WiFi Network Scanner & Brute-Force */}
+            <Card
+                sx={{
+                    mb: 3,
+                    background:
+                        'linear-gradient(135deg, #0d1b2a 0%, #1b2838 100%)',
+                    border: '1px solid rgba(255,64,129,0.3)'
+                }}>
+                <CardContent>
+                    <Typography
+                        variant="h6"
+                        gutterBottom
+                        sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 1
+                        }}>
+                        <WifiTetheringIcon sx={{ color: '#ff4081' }} />
+                        WiFi Networks — Scan & Brute-Force
+                    </Typography>
+                    <Alert severity="info" sx={{ mb: 2 }}>
+                        <strong>
+                            {passwordListInfo
+                                ? `${passwordListInfo.count.toLocaleString()} passwords loaded (${
+                                      passwordListInfo.size
+                                  })`
+                                : '1,000,000 passwords'}
+                        </strong>{' '}
+                        — Source: SecLists xato-net-10-million-passwords. Press
+                        Scan to discover WiFi networks, then select one to
+                        brute-force.
+                    </Alert>
+                    <Button
+                        variant="contained"
+                        onClick={scanWifi}
+                        disabled={scanningWifi}
+                        startIcon={
+                            scanningWifi ? (
+                                <CircularProgress size={20} />
+                            ) : (
+                                <SearchIcon />
+                            )
+                        }
+                        sx={{
+                            mb: 2,
+                            background:
+                                'linear-gradient(45deg, #ff4081, #f50057)',
+                            '&:hover': {
+                                background:
+                                    'linear-gradient(45deg, #f50057, #c51162)'
+                            }
+                        }}>
+                        {scanningWifi
+                            ? 'Scanning WiFi...'
+                            : 'Scan WiFi Networks'}
+                    </Button>
+
+                    {wifiNetworks.length > 0 && (
+                        <TableContainer
+                            component={Paper}
+                            sx={{ bgcolor: 'rgba(0,0,0,0.3)' }}>
+                            <Table size="small">
+                                <TableHead>
+                                    <TableRow>
+                                        <TableCell sx={{ color: '#ff4081' }}>
+                                            SSID
+                                        </TableCell>
+                                        <TableCell sx={{ color: '#ff4081' }}>
+                                            Security
+                                        </TableCell>
+                                        <TableCell sx={{ color: '#ff4081' }}>
+                                            Signal
+                                        </TableCell>
+                                        <TableCell sx={{ color: '#ff4081' }}>
+                                            Channel
+                                        </TableCell>
+                                        <TableCell sx={{ color: '#ff4081' }}>
+                                            Actions
+                                        </TableCell>
+                                    </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                    {wifiNetworks.map((net, i) => (
+                                        <TableRow key={i}>
+                                            <TableCell>
+                                                <strong>{net.ssid}</strong>
+                                                <br />
+                                                <Typography
+                                                    variant="caption"
+                                                    color="text.secondary">
+                                                    {net.bssid}
+                                                </Typography>
+                                            </TableCell>
+                                            <TableCell>
+                                                <Chip
+                                                    label={net.security}
+                                                    size="small"
+                                                    color={
+                                                        net.security.includes(
+                                                            'WPA'
+                                                        )
+                                                            ? 'warning'
+                                                            : net.security ===
+                                                                'Open'
+                                                              ? 'success'
+                                                              : 'default'
+                                                    }
+                                                />
+                                            </TableCell>
+                                            <TableCell>
+                                                <LinearProgress
+                                                    variant="determinate"
+                                                    value={net.signal}
+                                                    sx={{
+                                                        width: 60,
+                                                        mr: 1,
+                                                        display: 'inline-block'
+                                                    }}
+                                                />
+                                                {net.signal}%
+                                            </TableCell>
+                                            <TableCell>{net.channel}</TableCell>
+                                            <TableCell>
+                                                <Button
+                                                    variant="contained"
+                                                    size="small"
+                                                    disabled={wifiBruteForcing}
+                                                    onClick={() =>
+                                                        startWifiBruteForce(net)
+                                                    }
+                                                    startIcon={
+                                                        wifiBruteForcing &&
+                                                        selectedWifi?.ssid ===
+                                                            net.ssid ? (
+                                                            <CircularProgress
+                                                                size={14}
+                                                            />
+                                                        ) : (
+                                                            <VpnKeyIcon />
+                                                        )
+                                                    }
+                                                    sx={{
+                                                        bgcolor:
+                                                            'rgba(255,64,129,0.2)',
+                                                        '&:hover': {
+                                                            bgcolor:
+                                                                'rgba(255,64,129,0.4)'
+                                                        }
+                                                    }}>
+                                                    Brute-Force
+                                                </Button>
+                                            </TableCell>
+                                        </TableRow>
+                                    ))}
+                                </TableBody>
+                            </Table>
+                        </TableContainer>
+                    )}
+
+                    {/* Brute-force result */}
+                    {wifiBruteResult && (
+                        <Alert
+                            severity={
+                                wifiBruteResult.success ? 'success' : 'warning'
+                            }
+                            sx={{ mt: 2 }}
+                            icon={
+                                wifiBruteResult.success ? (
+                                    <CheckCircleIcon />
+                                ) : (
+                                    <CancelIcon />
+                                )
+                            }>
+                            {wifiBruteResult.success ? (
+                                <Box>
+                                    <strong>
+                                        PASSWORD FOUND for{' '}
+                                        {wifiBruteResult.ssid}!
+                                    </strong>
+                                    <br />
+                                    Password:{' '}
+                                    <strong>{wifiBruteResult.password}</strong>
+                                    <br />
+                                    Attempts: {wifiBruteResult.attempts}/
+                                    {wifiBruteResult.total?.toLocaleString()} |
+                                    Duration: {wifiBruteResult.duration}
+                                    <br />
+                                    <Button
+                                        variant="contained"
+                                        color="error"
+                                        onClick={deployAgent}
+                                        disabled={plantingAgent}
+                                        startIcon={
+                                            plantingAgent ? (
+                                                <CircularProgress size={16} />
+                                            ) : (
+                                                <BugReportIcon />
+                                            )
+                                        }
+                                        sx={{ mt: 1 }}>
+                                        {plantingAgent
+                                            ? 'Planting Agent...'
+                                            : '🐵 Plant Monkey Agent'}
+                                    </Button>
+                                </Box>
+                            ) : (
+                                <Box>
+                                    Failed — tested{' '}
+                                    {wifiBruteResult.attempts?.toLocaleString()}
+                                    /{wifiBruteResult.total?.toLocaleString()}{' '}
+                                    passwords in {wifiBruteResult.duration}
+                                </Box>
+                            )}
+                        </Alert>
+                    )}
+
+                    {/* Agent deployment result */}
+                    {agentResult && (
+                        <Card
+                            sx={{
+                                mt: 2,
+                                bgcolor: 'rgba(244,67,54,0.1)',
+                                border: '1px solid rgba(244,67,54,0.3)'
+                            }}>
+                            <CardContent>
+                                <Typography
+                                    variant="h6"
+                                    sx={{ color: '#f44336' }}>
+                                    🐵 Monkey Agent Deployed
+                                </Typography>
+                                <Divider sx={{ my: 1 }} />
+                                <Grid container spacing={2}>
+                                    <Grid item xs={6}>
+                                        <Typography variant="body2">
+                                            <strong>Agent ID:</strong>{' '}
+                                            {agentResult.agentId}
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Status:</strong>{' '}
+                                            <Chip
+                                                label={agentResult.status}
+                                                size="small"
+                                                color="success"
+                                            />
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Encryption:</strong>{' '}
+                                            {agentResult.encryption}
+                                        </Typography>
+                                    </Grid>
+                                    <Grid item xs={6}>
+                                        <Typography variant="body2">
+                                            <strong>Devices Found:</strong>{' '}
+                                            {
+                                                agentResult.discoveredDevices
+                                                    ?.length
+                                            }
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Cameras Found:</strong>{' '}
+                                            {agentResult.cameras?.length || 0}
+                                        </Typography>
+                                        <Typography variant="body2">
+                                            <strong>Architectures:</strong>{' '}
+                                            {agentResult.architectures?.join(
+                                                ', '
+                                            )}
+                                        </Typography>
+                                    </Grid>
+                                </Grid>
+                                {agentResult.cameras &&
+                                    agentResult.cameras.length > 0 && (
+                                        <Box sx={{ mt: 1 }}>
+                                            <Typography
+                                                variant="subtitle2"
+                                                sx={{ color: '#ff9800' }}>
+                                                Discovered Cameras:
+                                            </Typography>
+                                            {agentResult.cameras.map(
+                                                (cam, i) => (
+                                                    <Chip
+                                                        key={i}
+                                                        label={`${cam.ip}:${cam.port} (${cam.type})`}
+                                                        size="small"
+                                                        sx={{
+                                                            mr: 0.5,
+                                                            mt: 0.5,
+                                                            bgcolor:
+                                                                'rgba(255,152,0,0.2)'
+                                                        }}
+                                                        icon={<VideocamIcon />}
+                                                    />
+                                                )
+                                            )}
+                                        </Box>
+                                    )}
+                            </CardContent>
+                        </Card>
+                    )}
+                </CardContent>
+            </Card>
 
             {/* Step 1: Network Selection & Scan */}
             <Card

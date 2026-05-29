@@ -35,6 +35,7 @@
       ".next/**/*",
       "node_modules/**/*",
       "public/**/*",
+      "resources/**/*",
       "package.json",
       "next.config.js"
     ],
